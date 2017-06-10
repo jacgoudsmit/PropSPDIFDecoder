@@ -34,10 +34,28 @@ o)--+--||--o-| >o--+--|\|--o--| >o--+     NAND ports are 74HC00
                    |                    |    )o--+
                    +--------------------|___/
  
+
+The above schematic was what I tested with. Alternatively you can use
+the following but that hasn't been tested:
+
  
-(NOTE: it's probably possible to replace the two TTL chips by a single
-74HC86. I didn't test this at the time of this writing, so that is left
-as an exercise to the reader :-)
+          3.3V                          
+        10k|                         
+           Z         ___                       ___
+      100n |  +----\\   \       100R    +----\\   \        All ports
+o)--+--||--o--+    ||    >---+--|\|--o--+    ||    >--+    are 74HC86  
+    |      |     +-//___/    |       |     +-//___/   |    (XOR)
+    Z      Z     |           |       =     |          |
+ 75R|   10k|     |           |   100p|     |          |
+   gnd    gnd   gnd          |      gnd   gnd         |
+                             |                        |
+                             |                        |
+                             |   +--------------------+
+                             |   |     ___
+                             |   +---\\   \
+                             |       ||    >----> XORIN
+                             +-------//___/
+
  
 The input is connected to inverter A via a small circuit that provides the
 correct input impedance, a capacitor that decouples the DC, and a voltage
@@ -54,8 +72,8 @@ XOR port, the inversion compensates for the inverted output signal of
 inverter B): As long as the input signal doesn't change, the output of
 inverter B is always the inverse of channel A and the XORIN output is
 LOW. But when a positive or negative edge appears at the input, port
-B takes slightly longer to change polarity than port A, so for a short
-time, the outputs of ports A and B are equal and XORIN goes low during
+B changes polarity slightly  later than port A, so for a short
+time, the outputs of ports A and B are equal and XORIN goes high during
 that time, as illustrated below: 
  
          +-------+       +---+   +-------+   +---+           +---+   +--
@@ -80,10 +98,10 @@ necessary to have an oscilloscope or logic analyzer to use the circuit.
  
 I noticed there is a bit of jitter on the width of the positive pulses
 on XORIN. This should not be a problem because the code only waits for
-the positive edge only.
+the positive edges and ignores the negative edges.
  
 The project supports stereo PCM data between 32kHz and 48kHz sample
-frequency (Fs), stereo (only)(*). There are 32 bits in each subframe, and two
+frequency (Fs), stereo only(*). There are 32 bits in each subframe, and two
 subframes in each frame (one for each channel) so the rate at which the
 bits are encoded is between 2.048 and 3.072 MHz.
  
@@ -141,11 +159,12 @@ to odd), it means the encoded bit must have been a 1.
 XORIN    | |     | |     | | | | | |     | | | | | |         | | | | | |
          + +-----+ +-----+ +-+ +-+ +-----+ +-+ +-+ +---------+ +-+ +-+ +
  
-Propeller PPPPPW  PPPPPW  PPPPPW  PPPPPW  PPPPPW  PPPPPW      PPPPPW  PP
+Propeller PPPPPW..PPPPPW..PPPPPW..PPPPPW..PPPPPW..PPPPPW......PPPPPW..PP
  
-PHSx      1       2       3   4   5       6   7   8           9   10  11
-
-Oddness   ^ odd   ^ even  ^ odd   ^ odd   ^ even  ^ even      ^ odd
+Count     1       2       3   4   5       6   7   8           9   10  11
+Oddness   ^ odd   ^ even  ^ odd   ^ odd   ^ even  ^ even      ^ odd   ^
+Changed           ^ yes   ^ yes   ^ no    ^ yes   ^ no        ^ yes   ^
+Decoded           ^ 0     ^ 0     ^ 1     ^ 0     ^ 1         ^ 0     ^
                
 This method is amazingly reliable and very jitter-proof. It's much easier
 and reliable to let a timer count edges (while the code does an exactly
@@ -157,28 +176,35 @@ Another advantage of this method is that it's not necessary to reset the
 timer/counter at the beginning of each bit. We only need to keep track of
 whether the oddness changed between two bit times,
 
-We also don't need to reset the counter at any other time. In the event
-that the code starts at the wrong time and executes a WAITPxx when the
-SECOND pulse of a 1-bit comes in, it will straighten itself out very
-quickly (during the first 0-bit). Then when the code encounters a
-preamble, it will of course post the wrong data but the next subframe will
-be decoded correctly.
+We also don't need to reset the counter at any time. In the event that the
+code starts at the wrong time and executes a WAITPxx when the SECOND pulse
+of a 1-bit comes in, it will straighten itself out very quickly (during the
+next 0-bit). Then when the code encounters a preamble, it will of course
+post the wrong data but the next subframe will be decoded correctly.
 
          +-+     +-+     +-+ +-+ +-+     +-+ +-+ +-+         +-+ +-+ +-+
 XORIN    | |     | |     | | | | | |     | | | | | |         | | | | | |
          + +-----+ +-----+ +-+ +-+ +-----+ +-+ +-+ +---------+ +-+ +-+ +
 
-Propeller             PPPPPW  PPPPPW      PPPPPW  PPPPPW      PPPPPW  PP
+Propeller             PPPPPW..PPPPPW......PPPPPW..PPPPPW......PPPPPW..PP
                       ^start  ^outofsync  ^back in sync!
 
 So now we have an easy way to recover the bit clock (just execute a WAITPxx
 followed by 5 instructions) and we have binary data from the input stream.
+
 The next step is to figure out where one subframe ends and the next one
-begins. This needs to go in a separate cog because by now, the biphase
-decoder cog is just about as busy as it can be.
+begins. This needs to be done in a separate cog because the biphase decoder
+cog is just about as busy as it can be. Actually, the biphase decoder cog
+depends on the preamble decoder cog to recognize the end of a subframe and
+the beginning of the next subframe. The two cogs use external pins to
+communicate with extreme timing accuracy.
 
 Each subframe starts with a preamble which deliberately violates the
-biphase encoding. There are three kinds of preambles:
+biphase encoding. There are three kinds of preambles: The B-preamble, the
+M-preamble and the W-preamble. All preambles take 4 bit times (8*t) and
+start with a pulse that's 3*t long. The total number of polarity changes
+during a preamble is always 4.
+
 
              +-----------+   +---+           +---
 B-Preamble:  |           |   |   |           |
@@ -200,8 +226,8 @@ M-Preamble:  |           |           |   |   |
 (S/PDIF)    -+           +-----------+   +---+
 
             -+           +-----------+   +---+
-or:          |           |           |   |   |
-             +-----------+           +---+   +---
+or           |           |           |   |   |
+(inverted):  +-----------+           +---+   +---
 
              +-+         +-+         +-+ +-+ +-+
 XORIN:       | |         | |         | | | | | |
@@ -215,8 +241,8 @@ W-Preamble:  |           |       |   |       |
 (S/PDIF)    -+           +-------+   +-------+
 
             -+           +-------+   +-------+
-or:          |           |       |   |       |
-             +-----------+       +---+       +---
+or           |           |       |   |       |
+(inverted):  +-----------+       +---+       +---
 
              +-+         +-+     +-+ +-+     +-+
 XORIN:       | |         | |     | | | |     | |
@@ -230,78 +256,75 @@ PRADET:                 |                 | |
             ------------+                 +-+----
 
 Preamble cog
-events (see             ^A       ^B  ^C   ^D^E
+events (see  ^1         ^2       ^3A ^3B  ^4^5
 below)
             
 
-* The B-Preamble starts a block of 192 frames (384 subframes). These are
+* The B-Preamble starts a block of 192 frames (384 subframes). Blocks are
   needed to decode the subchannel data. The first subframe in a block is
   always for the left channel.
 * The M-Preamble indicates the start of a subframe for the left channel
   that's not at the beginning of a block.
 * The W-Preamble indicates the start of a subframe for the right channel.
 
-The preamble detector uses two timers: One timer counts positive edges on
-the XORIN input (just like the biphase bit decoder cog), and the other is
-set up as a Numerically Controlled Oscillator (NCO). We configure the NCO
-so that it basically counts Propeller clock cycles from the time we reset
-it, The most significant bit (msb) of the NCO counter is connected to the
-PRADET (PReAmble DETect) output pin. That pin is used by other cogs to
-synchronize to the beginning of a subframe.
+The preamble detector uses two timers:
+* One timer counts positive edges on the XORIN input (just like the
+  biphase bit decoder cog)
+* The other timer is set up as a Numerically Controlled Oscillator (NCO).
+  It basically sets the PRADET (PReAmble DETect) output high after a little
+  bit more than 2*t.
 
 The main loop of the preamble detector cog keeps waiting for an incoming
-pulse on XORIN (with the usual 5 instructions plus WAITPxx so it doesn't
-wait for extra pulses for 1-bits). As soon as execution continues after
-the WAITPxx, it stores the current flank count and adds 2 to it (we'll
-get back to that in a minute). Then it checks PRADET and resets the NCO.
+pulse on XORIN (with the usual minimum waiting time of 5 instructions plus
+WAITPxx so it doesn't get triggered by the pulses in the middle of the
+1-bits in the stream). At the beginning of each loop, it stores the current
+count of the edge counter to avoid "interference" from secondary incoming
+pulses.
 
-So when there is no preamble on the input, the NCO keeps getting reset,
-and the PRADET stays low. But when the first long pulse of a preamble
-comes in (event ^A) in the diagram above), the preamble detector doesn't
-reset the counter and falls through to the second part of the decoding.
+The main loop then checks the PRADET output to see if the long initial
+pulse of a preamble came in. If PRADET is still low, it means less than
+2*t have elapsed since the last reset (at event ^1). The code resets NCO so
+that it's ready to go again for the current bit, and it starts the loop over.
 
-The code executes exactly 5 instructions plus a WAITPxx. That brings the
-time to point ^B for preambles B or W, or to point ^C for an M preamble:
-after all, it waits a minimum of 2*t but after that, the WAITPxx
-instruction continues on the next pulse.
+If the PRADET output DID go high, we know that we're at event ^2 in the
+diagram above. We don't reset the NCO (otherwise PRADET would go low again)
+but we fall through to the second part of the preamble decoding code after
+we add the value of 2 to the copy (more about this in a minute). 
 
-After the WAITPxx, the code is at event ^D (for a B or M preamble) or at
-event ^E (for a W preamble). Just like during normal bits, it stores the
-NCO timer value and resets the NCO so that PRADET goes low. So this may
-happen at two different times depending on the preamble type, but it
-always happens just before the pulse that indicates the end of the
-preamble and the start of the first significant data bit. The biphase
-decoder waits for this to synchronize with the data bits in the next
-subframe.
+The above takes exactly 5 instructions, so now we execute a WAITPxx to wait
+for the next pulse close to 2*t after event ^2.
 
-So now, the preamble decoder needs to know two things to recognize which
-preamble is coming in:
-* How many pulses have come in? If there were 2 pulses during a minimum
-  of the 2*t duration, we know the preamble must be a B preamble. As I
-  mentioned, the code stores the previous count plus 2, so that at this
-  point, it can just compare the stored number with the actual count.
-* How much time elapsed between the last reset of the NCO and just after
-  the last WAITPxx inside the preamble? The previous NCO reset happened
-  at the beginning of the preamble when we didn't know that it was a
-  preamble yet. If the elapsed time since then is more than 5*t, this
-  must mean that an M preamble is coming in because it has a single long
-  pulse in the middle. Otherwise it must be a B or W preamble because
-  they have a pulse that comes in 1*t earlier.
+For preambles B or W, there is a phase change at event ^3 in the diagram,
+but for preamble M, it takes until event ^4 before the next pulse arrives.
+After the WAITPxx instruction, we're either at event ^3A or ^3B depending on
+the length of the pulse. The code immediately checks the current edge
+counter to test if it's equal to the previous counter value plus 2. If equal,
+the current preamble is a B preamble and the Zero flag is set to 1.
 
-The code combines those two things, and sets the BLKDET (BLocK DETect)
-output pin high or low depending on whether this is a B preamble. It
-also sets the RCHAN (Right CHANnel) output high if this is a W preamble,
-and low if it isn't.
+Next, the code checks how many Propeller cycles have elapsed since the last
+reset of the NCO (which happened at event ^1). Then it resets the NCO at
+event ^4 or ^5.
 
-There's a little bit of extra processing involved in deciding whether to
-set the BLKDET and RCHAN outputs high or low, but that's okay. Any cog
-that wants to know what kind of subframe this is, won't need to know it
-until the end of the subframe when the next preamble is detected.
+If more than 5*t have elapsed, it must mean that a long pulse must have
+followed after the initial pulse, so this must be an M preamble; if less
+time elapsed, it must be a B or W preamble.
+
+So now we know whether a B preamble came in and when an M preamble came in.
+We do a one-instruction conditional change of the Carry flag so that it
+is set not only when an M preamble came in but also when a B preamble came
+in. The Zero flag and the Carry flag are then posted onto the BLKDET (BLocK
+DETect) and RCHAN (Right CHANnel) output pins.
+
+It actually takes a little bit of extra time to decide whether to set the
+BLKDET and RCHAN outputs high or low, but that's okay. Any cog that wants
+to know what kind of subframe this is, won't need to know it until the end
+of the subframe when the next preamble is detected.
   
 Another cog can recover the data from the S/PDIF input by doing the
 following:
 1. Wait for XORIN to go high
-2. Wait for 2 (3?) more instructions (or do something else useful)
+2. Wait for a constant number of instruction (or do something else useful)
+   (1-bit delay depends on how fast code picks up binary signal)
 3. Read the binary bit on the BINDAT output and rotate it into the result
    from the bottom
 4. Test if PRADET is HIGH. If not, go to step 1.
@@ -310,7 +333,7 @@ following:
    result in the hub.
 6. Wait for PRADET low and go to step 1.
       
-The time available for steps 4 to 6 (inclusive) is 4t (651.2ns worst case
+The time available for steps 4 to 6 (inclusive) is 4*t (651.2ns worst case
 at 48kHz). The worst-case timing for a WRLONG is 23 cycles (287.5ns) so if
 you want to write the data to the hub, you have 463.7ns (about 9
 instructions) left over for other processing. I may implement this in the
@@ -436,6 +459,9 @@ dploop
                         cmp     dpcount, phsa wz        ' Z=1 C=0 for B preamble, Z=0 M or W preamble
                         cmp     dpdetectm, phsb wc      ' C=1 for M preamble, C=0 B or W preamble
                         mov     phsb, #0                ' Reset Timer B at exact same time as usual
+                                                        ' ... but reset it to 0 so compensate for longer
+                                                        '     time spent in the next few instructions
+                                                        
               if_z      cmp     dpzero, #1 wc           ' Set C if Z=1
 
                         ' At this point:
