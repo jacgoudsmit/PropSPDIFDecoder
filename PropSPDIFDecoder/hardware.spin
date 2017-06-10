@@ -30,10 +30,10 @@ CON
   pin_14
   pin_15
 
-  pin_BINDAT                    ' Recovered binary data
-  pin_PRADET                    ' Preamble Detect
-  pin_BLKDET                    ' Beginning of block Detect                                                
-  pin_RCHAN                     ' Right channel
+  pin_16
+  pin_PRADET                    ' Preamble Detect (Also used internally) 
+  pin_BLKDET                    ' Beginning of block Detect (Also used internally)                                               
+  pin_LCHAN                     ' Left channel (Also used internally)
 
   pin_20
   pin_21
@@ -52,16 +52,35 @@ CON
 
   ' Bitmasks for each of the pins
   mask_XORIN  = |< pin_XORIN
-  mask_BINDAT = |< pin_BINDAT
   mask_PRADET = |< pin_PRADET
   mask_BLKDET = |< pin_BLKDET
-  mask_RCHAN  = |< pin_RCHAN
+  mask_LCHAN  = |< pin_LCHAN
   mask_LED26  = |< pin_LED26
   mask_LED27  = |< pin_LED27
 
   ' Use pin 26 as debug output
   pin_DEBUG = pin_LED26
-  mask_DEBUG = mask_LED26  
+  mask_DEBUG = mask_LED26
+
+  ' For communication between cogs, the following masks are used to
+  ' indicate whether a subframe's longword was the start of a block, or
+  ' whether it was for the left channel.
+  ' We use this combination to make it possible to detect the state of both
+  ' bits with a single TEST operation that uses both WZ and WC:
+  ' * If the subframe was the beginning of a block, the (non-inverted)
+  '   value will have both the LCHAN and BLKDET bits set, so Z=0 and C=0
+  ' * If the subframe was not the first frame of a block but was for the
+  '   left channel, it will only have LCHAN set, so Z=0 and C=1
+  ' * If the subframe was for the right channel, neither bits will be set,
+  '   so Z=1 and C=0 (Z=1 and C=1 is impossible after a test with WC WZ).
+  ' Obviously when testing, only one bit for each flag should be tested,
+  ' but to maintain even parity in the total value, two bits are set for
+  ' each flag.
+  mask_ENC_LCHAN  = $0000_0005  ' Bits to set for left channel
+  mask_ENC_BLKDET = $0000_000A  ' Bits to set for block detect
+  mask_DEC_LCHAN  = $0000_0001  ' Bit to test for left channel
+  mask_DEC_BLKDET = $0000_0002  ' Bit to test for block detect
+
   
 PUB dummy
 {{ The module won't compile with at least one public function }}

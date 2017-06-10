@@ -312,32 +312,50 @@ time elapsed, it must be a B or W preamble.
 So now we know whether a B preamble came in and when an M preamble came in.
 We do a one-instruction conditional change of the Carry flag so that it
 is set not only when an M preamble came in but also when a B preamble came
-in. The Zero flag and the Carry flag are then posted onto the BLKDET (BLocK
-DETect) and RCHAN (Right CHANnel) output pins.
+in (i.e. whenever a subframe was for the left channel). The Zero flag and
+the Carry flag are then posted onto the BLKDET (BLocK DETect) and LCHAN
+(Left CHANnel) output pins. NOTE: we set the channel to 1 for the LEFT
+(not right) channel, because it makes it possible to test the two pins
+at the same time:
+* If this is the first subframe of a block, both LCHAN and BLKDET are 1,
+  so when testing both bits at the same time, Z=0 and C=0.
+* If this is another left subframe (not at the start of a block), only
+  the LCHAN pin is 1, so Z=0 and C=1.
+* If this is a right channel subframe, Z=1 and C=0.
+* The combination of Z=1 and C=1 is impossible.
 
 It actually takes a little bit of extra time to decide whether to set the
-BLKDET and RCHAN outputs high or low, but that's okay. Any cog that wants
+BLKDET and LCHAN outputs high or low, but that's okay. Any cog that wants
 to know what kind of subframe this is, won't need to know it until the end
 of the subframe when the next preamble is detected.
-  
-Another cog can recover the data from the S/PDIF input by doing the
-following:
-1. Wait for XORIN to go high
-2. Wait for a constant number of instruction (or do something else useful)
-   (1-bit delay depends on how fast code picks up binary signal)
-3. Read the binary bit on the BINDAT output and rotate it into the result
-   from the bottom
-4. Test if PRADET is HIGH. If not, go to step 1.
-5. The result should have 28 significant bits. Shift the result left by 4
-   bits, optionally rotating the BLKDET and RCHAN pins in. Then store the
-   result in the hub.
-6. Wait for PRADET low and go to step 1.
-      
-The time available for steps 4 to 6 (inclusive) is 4*t (651.2ns worst case
-at 48kHz). The worst-case timing for a WRLONG is 23 cycles (287.5ns) so if
-you want to write the data to the hub, you have 463.7ns (about 9
-instructions) left over for other processing. I may implement this in the
-Biphase cog in the future. 
+
+So now we have a pulse on the PRADET output pin that goes from low to high
+as soon as a preamble is detected (actually shortly before the end of the
+long pulse at the beginning of the preamble, as a result of the preamble
+NCO timer timing out), and goes low again just before the beginning of the
+first significant data bit in the new subframe.
+
+The biphase decoder cog rotates data bits into a longword that is used
+to keep track of the bits in the subframe. It also checks if a preamble was
+detected. If so, it jumps to the preamble code.
+
+Because the biphase decoder has to check whether the oddness CHANGED, it
+consists of two parts: one part that's executed if the count in the
+previous loop was even, one part that's executed if the count in the
+previous loop was odd.
+
+Testing for the preamble (and bailing out if it was detected) and rotating
+the oddnes into the result data turned out to be one cycle too many. The
+solution was to only test for the preamble in the "even" loop (after all,
+it can't occur in the "odd" loop anyway. But in a small case of "digital
+irony", the carry flag in the "even" loop indicates when the encoded bit
+was 1 (not zero) and in the "odd" loop, the carry flag corresponds to the
+encoded bit. Because we don't have to test for the preamble in the "odd"
+loop, we have one extra instruction of time to invert the bit after it's
+added to the result data, so the code just ends up composing the data in
+ones-complement of the actual value. And there is just enough time during
+the preamble pulse to store that value in the hub. Any cog that wants to
+pick up and process the value, will have to XOR it with $FFFF_FFFF first.
 
 (*) I just realized that 48kHz may be a little too fast for the current
 code: the time-critical loops consist of 5 regular instructions (4 clocks)
@@ -357,69 +375,123 @@ OBJ
   hw:           "hardware"      ' Pin assignments and other global constants
 
 VAR
-  long  pradet_delay            ' Number of Propeller clocks in a preamble         
+  long  pradet_delay            ' Number of Propeller clocks in a preamble
                                 
-PUB biphasedec(par_delay)
+PUB biphasedec(par_delay, par_psample)
 '' par_delay (long): Number of Propeller clocks in a preamble
+'' par_psample (pointer to long): Location to store constantly updating sample
 
   pradet_delay := par_delay
   
-  cognew(@decodebiphase, 0)
+  cognew(@decodebiphase, @par_psample)
   cognew(@detectpreamble, @pradet_delay)
-
   
 DAT
-
+             
                         org     0
 decodebiphase
-                        ' Set up I/O
-                        mov     dira, outputmask                        
-                        mov     outa, #0
-
                         ' Set up timer A, used to count pulses on XORIN
                         mov     ctra, ctraval
                         mov     frqa, frqaval
-                        mov     phsa, reseta
+                        mov     phsa, #0
+                        jmp     #evenloop
 
+preamble
+                        ' Just after the detection of a preamble, test the pins
+                        ' that tell us what kind of subframe this is.
+                        ' The only possible combinations are:
+                        ' * LCHAN is high and BLKDET is high (Left, first of block) -> C=0 Z=0
+                        ' * LCHAN is high and BLKDET is low  (Left, not first)      -> C=1 Z=0
+                        ' * LCHAN is low  and BLKDET is low  (Right)                -> C=0 Z=1
+                        ' We encode those flags into the (inverted) data that we post to
+                        ' the hub, in such a way that the parity remains the same. 
+                        test    mask_BLKDET_LCHAN, ina wc,wz
+                        muxz    data, mask_ENC_LCHAN    ' Make (inverted) bits 0 for left ch
+              if_nz     muxnc   data, mask_ENC_BLKDET   ' Make (inverted) bits 0 for block det
+
+                        wrlong  data, par               ' Write the data to the hub                             
+                        waitpeq zero, mask_PRADET       ' Wait until end of preamble
+
+                        ' Fall through to the even-loop of the decoder. We got here from
+                        ' the even-loop and the preamble has 4 edges so the number should
+                        ' be even again so this is the right thing to do.
+                        '
+                        ' Even in the worst case (where data comes in at the highest possible
+                        ' speed and the WRLONG took 23 Propeller clocks), we should now be
+                        ' just ahead of the pulse that marks the start of bit 4 of the
+                        ' subframe.
+                        '
+                        ' The code will spend the following bit time to decode bit 3, but of
+                        ' course this is not really necessary (it's always 0 because we're in
+                        ' the even loop and the counter will end up being odd after the
+                        ' initial WAITPxx), so in the future we may spend this first bit time
+                        ' doing some housekeeping to store the data into a buffer that holds
+                        ' all the data for an entire block.
 evenloop
                         waitpne zero, mask_XORIN        ' Flank detected
                         test    one, phsa wc            ' C=1 if odd number of total flanks
-                        muxnc   outa, mask_BINDAT       ' We started even, so odd=0
 
                         test    mask_PRADET, ina wz     ' Z=0 if preamble detected
               if_nz     jmp     #preamble                    
 
+                        ' NOTE: C=1 if the encoded bit was 0 (!)
+                        '
+                        ' We don't have time to manipulate the data in a such a way
+                        ' that the bit that we rotate into it, corresponds to the encoded bit.
+                        ' So instead, we simply rotate the carry flag into the result
+                        ' and at the end of the subframe, all bits in the result are inverted.
+                        rcr     data, #1                ' Rotate 1 if bit was 0, or vice versa 
                         
               if_nc     jmp     #evenloop               ' Go to even loop if total still even
               
 oddloop
                         waitpne zero, mask_XORIN        ' Flank detected
                         test    one, phsa wc            ' C=1 if odd number of total flanks
-                        muxc    outa, mask_BINDAT       ' We started odd, so odd=1
 
+                        ' NOTE: C=1 if the encoded bit was 1.
+                        '
+                        ' We didn't have time in the even-loop to inverse the carry
+                        ' because we needed time to test for preamble there. Here we don't
+                        ' have to test for preamble because the total number of bits in a
+                        ' subframe is never odd (if it happens anyway, something is wrong).
+                        ' Here we have a simple case of "the carry flag is the bit value"
+                        ' and we have some time to invert the bit after we insert it, so at
+                        ' the end of the subframe, all bits in the result are inverted.
+                        rcr     data, #1                ' Rotate 1 if bit was 1, or vice versa
+                        xor     data, v8000_0000        ' Invert the inserted bit
+                        
               if_nc     jmp     #evenloop
                         jmp     #oddloop                                  
 
-preamble                andn    outa, mask_BINDAT       ' Listen for input from preamble detector
-                        waitpeq zero, mask_PRADET       ' Wait until end of preamble
-                        mov     phsa, #0                ' Always start even (shouldn't be needed)
-                        jmp     #evenloop                             
                         
                                       
 
 ctraval                 long    (%01010 << 26) | hw#pin_XORIN ' Count pos. edges on XORIN                   
 frqaval                 long    1
-reseta                  long    0
 
 zero                    long    0
 one                     long    1
+v8000_0000              long    $8000_0000
 
-data                    long    0
+                        ' The data stored here is the one's complement of the actual received
+                        ' bits.
+                        '
+                        ' When valid data is received, the (unreversed) data always has even
+                        ' parity when it's valid.
+                        '
+                        ' We encode the preamble type into the low 4 bits (see the hardware
+                        ' module for encoding values), two bits at a time so that parity is
+                        ' still always even.
+                        '
+                        ' We initialize the value with an odd-parity value to ensure that
+                        ' it will be rejected by other code.
+data                    long    $7FFF_FFFF
 
-outputmask              long    hw#mask_BINDAT
 mask_XORIN              long    hw#mask_XORIN
 mask_PRADET             long    hw#mask_PRADET
-mask_BINDAT             long    hw#mask_BINDAT
+mask_BLKDET_LCHAN       long    hw#mask_BLKDET | hw#mask_LCHAN
+mask_ENC_BLKDET         long    hw#mask_ENC_BLKDET
+mask_ENC_LCHAN          long    hw#mask_ENC_LCHAN        
 
                         fit
 
@@ -451,16 +523,21 @@ dploop
                         test    dpmask_PRADET, ina wz   ' Z=0 if preamble                        
               if_z      mov     phsb, dpresetb          ' Reset timer B, 8 cycles too late
 
-                        add     dpcount, #2             ' Expect two flanks for a B preamble, one otherwise                        
+                        add     dpcount, #2             ' Expect 2 flanks for B preamble                        
               if_z      jmp     #dploop
 
                         ' Preamble detected.                        
                         waitpne dpzero, dpmask_XORIN
-                        cmp     dpcount, phsa wz        ' Z=1 C=0 for B preamble, Z=0 M or W preamble
-                        cmp     dpdetectm, phsb wc      ' C=1 for M preamble, C=0 B or W preamble
-                        mov     phsb, #0                ' Reset Timer B at exact same time as usual
-                                                        ' ... but reset it to 0 so compensate for longer
-                                                        '     time spent in the next few instructions
+                        cmp     dpcount, phsa wz        ' Z=1 C=0 for B; otherwise M or W
+                        cmp     dpdetectm, phsb wc      ' C=1 for M; otherwise B or W
+
+                        ' Reset timer B at the exact same time (relative to the previous
+                        ' pulse on XORIN) as usual, but use a reset-value of 0 to compensate
+                        ' for the unusually long time we spend in the next few instructions.
+                        ' Effectively, this switches the preamble detection off until the next
+                        ' incoming pulse on XORIN, but that's okay, we're not expecting one
+                        ' for a while anyway
+                        mov     phsb, #0
                                                         
               if_z      cmp     dpzero, #1 wc           ' Set C if Z=1
 
@@ -474,7 +551,7 @@ dploop
                         ' but these signals won't be needed by other cogs until
                         ' they get to the end of the current subframe anyway.
                         muxz    outa, dpmask_BLKDET                                              
-                        muxnc   outa, dpmask_RCHAN
+                        muxc    outa, dpmask_LCHAN
 
                         ' NOTE: This would be a good time to read an updated value
                         ' of the timing constant from the hub (to make it possible to
@@ -504,11 +581,11 @@ dpcount                 long    0
 dpzero                  long    0
 dpdetectm               long    $8000_0000              ' Add 3*t cycles to this
 
-dpoutputmask            long    hw#mask_PRADET | hw#mask_BLKDET | hw#mask_RCHAN
+dpoutputmask            long    hw#mask_PRADET | hw#mask_BLKDET | hw#mask_LCHAN
 dpmask_XORIN            long    hw#mask_XORIN
 dpmask_PRADET           long    hw#mask_PRADET
 dpmask_BLKDET           long    hw#mask_BLKDET
-dpmask_RCHAN            long    hw#mask_RCHAN        
+dpmask_LCHAN            long    hw#mask_LCHAN        
 
                         fit
                                                 
