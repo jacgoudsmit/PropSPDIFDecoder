@@ -62,24 +62,26 @@ CON
   pin_DEBUG = pin_LED26
   mask_DEBUG = mask_LED26
 
-  ' For communication between cogs, the following masks are used to
-  ' indicate whether a subframe's longword was the start of a block, or
-  ' whether it was for the left channel.
-  ' We use this combination to make it possible to detect the state of both
-  ' bits with a single TEST operation that uses both WZ and WC:
-  ' * If the subframe was the beginning of a block, the (non-inverted)
-  '   value will have both the LCHAN and BLKDET bits set, so Z=0 and C=0
-  ' * If the subframe was not the first frame of a block but was for the
-  '   left channel, it will only have LCHAN set, so Z=0 and C=1
-  ' * If the subframe was for the right channel, neither bits will be set,
-  '   so Z=1 and C=0 (Z=1 and C=1 is impossible after a test with WC WZ).
-  ' Obviously when testing, only one bit for each flag should be tested,
+  ' The following masks are used to encode the preamble type into the
+  ' data for each subframe, as stored into the hub by the Biphase decoder.
+  ' 
+  ' Obviously when testing, only one bit for each flag needs to be tested,
   ' but to maintain even parity in the total value, two bits are set for
   ' each flag.
-  mask_ENC_LCHAN  = $0000_0005  ' Bits to set for left channel
-  mask_ENC_BLKDET = $0000_000A  ' Bits to set for block detect
-  mask_DEC_LCHAN  = $0000_0001  ' Bit to test for left channel
-  mask_DEC_BLKDET = $0000_0002  ' Bit to test for block detect
+  '
+  ' In the process of encoding the flags, the channel is encoded first
+  ' and the block-detection is decoded next. The block-detection has to
+  ' be encoded in a conditional instruction that's only executed for
+  ' a left-channel subframe, so to avoid not setting the block-detect
+  ' bits for a right-channel frame, the left channel encoding mask includes
+  ' the block-detect bits, and because all bits are set to 0 for the right
+  ' channel, the block-detect bits will be set to the BLKDET value for the
+  ' left channel and will be unchanged (at the correct value of 0) for
+  ' the right channel.  
+  mask_ENC_LFTBLK = %0000_0000_0000_1111 ' Bits to set for Lchan | block
+  mask_ENC_BLKDET = %0000_0000_0000_1100 ' Bits to set for block detect
+  mask_DEC_LCHAN  = %0000_0000_0000_0001 ' Bit to test for left channel
+  mask_DEC_BLKDET = %0000_0000_0000_0100 ' Bit to test for block detect
 
   
 PUB dummy

@@ -70,11 +70,11 @@ inverter B).
 The rest of the circuit forms an equivalence circuit (i.e. an inverted
 XOR port, the inversion compensates for the inverted output signal of
 inverter B): As long as the input signal doesn't change, the output of
-inverter B is always the inverse of channel A and the XORIN output is
+inverter B is always the inverse of channel A, and the XORIN output is
 LOW. But when a positive or negative edge appears at the input, port
-B changes polarity slightly  later than port A, so for a short
-time, the outputs of ports A and B are equal and XORIN goes high during
-that time, as illustrated below: 
+B changes polarity slightly later than port A, so for a short time, the
+outputs of ports A and B are equal and XORIN goes high during that time,
+as illustrated below: 
  
          +-------+       +---+   +-------+   +---+           +---+   +--
 A out    |   0   |   0   |   1   |   0   |   1   |     P     |   1   |
@@ -94,7 +94,8 @@ than the time it takes to execute one instruction (4 clock cycles i.e.
 50ns). According to my oscilloscope, the 100 Ohm, 100 pF combination
 generates pulses on XORIN that are about 30ns wide so that's perfect.
 There should be no need to adjust any of the resistors, and it's not
-necessary to have an oscilloscope or logic analyzer to use the circuit. 
+necessary to have an oscilloscope or logic analyzer to use the circuit
+and the software. 
  
 I noticed there is a bit of jitter on the width of the positive pulses
 on XORIN. This should not be a problem because the code only waits for
@@ -102,13 +103,13 @@ the positive edges and ignores the negative edges.
  
 The project supports stereo PCM data between 32kHz and 48kHz sample
 frequency (Fs), stereo only(*). There are 32 bits in each subframe, and two
-subframes in each frame (one for each channel) so the rate at which the
-bits are encoded is between 2.048 and 3.072 MHz.
+subframes in each frame (one subframe for each channel) so the rate at
+which the bits are encoded is between 2.048 and 3.072 MHz.
  
-The shortest time period that we have to measure (let's call it "t")
+The shortest time period that we have to deal with (let's call it "t")
 is the time that the input signal stays at the same level during the
 transmission of a "1" bit. This corresponds to half the time of one
-encoded bit, and conversely the duration of one encoded bit is 2*t.
+encoded bit, and conversely, the duration of one encoded bit is 2*t.
  
 Here's an overview of some timing values.      
  
@@ -121,19 +122,14 @@ Here's an overview of some timing values.
 | 32,000 | 2,048,000 | 244.1 | 488.3 | 732.4 | 19.5   | 39.1   | 58.6   |
 +--------+-----------+-------+-------+-------+--------+--------+--------+
 
-With most Propeller instructions taking 4 cycles of 12.5ns each, the
-software has about 6 instructions time to decode and process each bit in
-the incoming data stream. We use this fact to our advantage: all
-timing-critical loops have a single WAITPxx instruction to synchronize
-with the XORIN input, and exactly 5 additional instructions to do their
-processing. That way, processing an incoming bit always takes a minimum
-of about 325ns: the WAITPxx instruction takes at least 6 cycles and the
-other 5 instructions take 4 cycles each.
-
-If the data stream is slower, the WAITPxx instructions will ensure that
-the Propeller stays in synch with the input signal. In other words, the
-Propeller stays busy processing stuff just short enough to be able to wait
-for the next pulse on XORIN.
+All timing-critical loops have a WAITPxx instruction to keep synchronized
+with the XORIN pulses at the beginning of each bit, and there are exactly
+5 additional instructions between those WAITPxx instructions, to do all
+the processing. The WAITPxx instruction takes at least 6 cycles and the
+other 5 instructions take 4 cycles each, which adds up to 325ns if the
+Propeller runs at 80MHz. This is long enough to avoid catching the second
+pulse of a 1-bit in the WAITPxx, and short enough to make sure that the
+WAITPxx always catches the pulse between the bits. 
 
 This is illustrated in the diagram below: The letters "P" indicate the
 execution of an instruction that processes the data, and the letters "W"
@@ -145,8 +141,8 @@ input signal.
 The next step is to extract the data from the input stream. To do this,
 we program a timer to count positive edges on the XORIN input. Whenever
 execution passes a WAITPxx instruction, we know that we're at the beginning
-of a new bit in the stream. At that point, all the code needs to know to
-decode the bit is:
+of a new bit in the stream. At that point, the only thing that the code
+needs to know to decode the bit is:
 * Is the edge counter odd or even now?
 * Was the edge counter odd at the beginning of the previous bit?
 
@@ -173,14 +169,16 @@ the exact right times) than it would be to write code to sample the input
 to see if a second pulse arrived in the middle of a bit.
 
 Another advantage of this method is that it's not necessary to reset the
-timer/counter at the beginning of each bit. We only need to keep track of
-whether the oddness changed between two bit times,
+timer/counter at the beginning of each bit (which would cost extra time and
+would imply a possible race condition). We only need to keep track of
+whether the oddness changed between two bit times, and make sure we check
+the count at those bit times only,
 
-We also don't need to reset the counter at any time. In the event that the
-code starts at the wrong time and executes a WAITPxx when the SECOND pulse
-of a 1-bit comes in, it will straighten itself out very quickly (during the
-next 0-bit). Then when the code encounters a preamble, it will of course
-post the wrong data but the next subframe will be decoded correctly.
+We also don't need to reset the counter at the end of a subframe. In the
+event that the code starts at the wrong time and executes a WAITPxx when
+the SECOND pulse of a 1-bit comes in, it will straighten itself out very
+quickly (during the next 0-bit). Then when the code encounters a preamble,
+it may post the wrong data but the next subframe will be decoded correctly.
 
          +-+     +-+     +-+ +-+ +-+     +-+ +-+ +-+         +-+ +-+ +-+
 XORIN    | |     | |     | | | | | |     | | | | | |         | | | | | |
@@ -197,13 +195,14 @@ begins. This needs to be done in a separate cog because the biphase decoder
 cog is just about as busy as it can be. Actually, the biphase decoder cog
 depends on the preamble decoder cog to recognize the end of a subframe and
 the beginning of the next subframe. The two cogs use external pins to
-communicate with extreme timing accuracy.
+communicate with low latency and high accuracy.
 
 Each subframe starts with a preamble which deliberately violates the
 biphase encoding. There are three kinds of preambles: The B-preamble, the
-M-preamble and the W-preamble. All preambles take 4 bit times (8*t) and
+M-preamble and the W-preamble. All preambles take 4 bit-times (8*t) and
 start with a pulse that's 3*t long. The total number of polarity changes
-during a preamble is always 4.
+during a preamble (including the flank at the end that marks the start of
+the first bit with usable data) is always 4.
 
 
              +-----------+   +---+           +---
@@ -251,12 +250,12 @@ XORIN:       | |         | |     | | | |     | |
 
 
 
-                        +-----------------+-+
-PRADET:                 |                 | |
-            ------------+                 +-+----
+                       +------------------+-+
+PRADET:                |                  | |
+            -----------+                  +-+----
 
 Preamble cog
-events (see  ^1         ^2       ^3A ^3B  ^4^5
+events (see  ^1          ^2      ^3A ^3B  ^4^5
 below)
             
 
@@ -267,67 +266,82 @@ below)
   that's not at the beginning of a block.
 * The W-Preamble indicates the start of a subframe for the right channel.
 
-The preamble detector uses two timers:
+To decode these preambles, the preamble detector cog uses two timers:
 * One timer counts positive edges on the XORIN input (just like the
-  biphase bit decoder cog)
+  biphase bit decoder cog, but it's used slightly differently)
 * The other timer is set up as a Numerically Controlled Oscillator (NCO).
-  It basically sets the PRADET (PReAmble DETect) output high after a little
-  bit more than 2*t.
+  It's configured to make the PRADET (PReAmble DETect) output high after a
+  little bit more time than 2*t.
 
 The main loop of the preamble detector cog keeps waiting for an incoming
-pulse on XORIN (with the usual minimum waiting time of 5 instructions plus
-WAITPxx so it doesn't get triggered by the pulses in the middle of the
-1-bits in the stream). At the beginning of each loop, it stores the current
-count of the edge counter to avoid "interference" from secondary incoming
-pulses.
+pulse on XORIN (with the same minimum waiting time of 5 instructions plus a
+WAITPxx as the Biphase Decoder cog, so it doesn't get triggered by the
+pulses in the middle of the 1-bits in the stream). At the beginning of each
+loop, it stores the current count of the edge counter to avoid
+"interference" from secondary incoming pulses later during processing.
 
 The main loop then checks the PRADET output to see if the long initial
 pulse of a preamble came in. If PRADET is still low, it means less than
-2*t have elapsed since the last reset (at event ^1). The code resets NCO so
-that it's ready to go again for the current bit, and it starts the loop over.
+2*t have elapsed since the last reset (at event ^1 in the drawing above).
+The code resets NCO so that it's ready to go again for the current bit, and
+it starts the loop over.
 
 If the PRADET output DID go high, we know that we're at event ^2 in the
 diagram above. We don't reset the NCO (otherwise PRADET would go low again)
 but we fall through to the second part of the preamble decoding code after
-we add the value of 2 to the copy (more about this in a minute). 
+we add the value of 2 to the copy of the count from the NCO timer (more
+about this in a minute). 
 
 The above takes exactly 5 instructions, so now we execute a WAITPxx to wait
 for the next pulse close to 2*t after event ^2.
 
-For preambles B or W, there is a phase change at event ^3 in the diagram,
-but for preamble M, it takes until event ^4 before the next pulse arrives.
-After the WAITPxx instruction, we're either at event ^3A or ^3B depending on
-the length of the pulse. The code immediately checks the current edge
-counter to test if it's equal to the previous counter value plus 2. If equal,
-the current preamble is a B preamble and the Zero flag is set to 1.
+For preambles B or W, there is a pulse at event ^3 in the diagram, but for
+preamble M, it takes until event ^4 before the next pulse arrives. After
+the WAITPxx instruction, we're either at event ^3A or ^3B, depending on the
+length of the pulse. The code immediately checks the current edge counter
+to test if it's equal to the previous counter value plus 2 (that's the
+reason why we just added 2). If equal, the current preamble is a B preamble
+and the Zero flag is set to 1.
 
 Next, the code checks how many Propeller cycles have elapsed since the last
-reset of the NCO (which happened at event ^1). Then it resets the NCO at
-event ^4 or ^5.
+reset (at event ^1) of the NCO. Then it resets the NCO at event ^4 or ^5.
 
 If more than 5*t have elapsed, it must mean that a long pulse must have
-followed after the initial pulse, so this must be an M preamble; if less
-time elapsed, it must be a B or W preamble.
+followed after the initial pulse, so this must be an M preamble because
+it's the only one that starts with 2 long pulses; if less time elapsed, it
+must be a B or W preamble. This is recorded in the Carry flag (C=1 for M,
+C=0 for B or W).
 
+At this time, we know how long it will be before the next biphase bit will
+start. We reinitialize the NCO timer so that it makes the BLKDET output low
+just before the next data bit comes in.
+ 
 So now we know whether a B preamble came in and when an M preamble came in.
 We do a one-instruction conditional change of the Carry flag so that it
 is set not only when an M preamble came in but also when a B preamble came
-in (i.e. whenever a subframe was for the left channel). The Zero flag and
-the Carry flag are then posted onto the BLKDET (BLocK DETect) and LCHAN
-(Left CHANnel) output pins. NOTE: we set the channel to 1 for the LEFT
-(not right) channel, because it makes it possible to test the two pins
-at the same time:
+in. That way, the Carry flag is set for all subframes that are for the left
+channel. The Zero flag and the Carry flag are then posted onto the BLKDET
+(BLocK DETect) and LCHAN (Left CHANnel) output pins.
+
+NOTE: we set the channel to 1 for the LEFT (not right) channel, because it
+saves time when decoding the pins in the Biphase Decoder cog: a single TEST
+with the WC and WZ options is enough to test the two pins at the same time:
 * If this is the first subframe of a block, both LCHAN and BLKDET are 1,
   so when testing both bits at the same time, Z=0 and C=0.
 * If this is another left subframe (not at the start of a block), only
   the LCHAN pin is 1, so Z=0 and C=1.
 * If this is a right channel subframe, Z=1 and C=0.
-* The combination of Z=1 and C=1 is impossible.
+* The combination of Z=1 and C=1 is impossible after a TEST instruction
+  that writes both flags.
 
-It actually takes a little bit of extra time to decide whether to set the
-BLKDET and LCHAN outputs high or low, but that's okay. Any cog that wants
-to know what kind of subframe this is, won't need to know it until the end
-of the subframe when the next preamble is detected.
+The time that's needed to decide whether to set the BLKDET and LCHAN
+outputs high or low, is longer than the rest of the preamble. That means
+that the BLKDET and RCHAN outputs are changed after the preamble is alreadu
+over. That's fine; the Biphase Decoder cog (or any cog that wants
+to know what kind of subframe this is), won't need to probe the two pins
+until the end of the subframe when the next preamble is detected. Of course
+the preamble detection code still stays in sync with the bit clock by using
+the old "5 instructions and a WAITPxx" mandate.
 
 So now we have a pulse on the PRADET output pin that goes from low to high
 as soon as a preamble is detected (actually shortly before the end of the
@@ -344,30 +358,36 @@ consists of two parts: one part that's executed if the count in the
 previous loop was even, one part that's executed if the count in the
 previous loop was odd.
 
-Testing for the preamble (and bailing out if it was detected) and rotating
-the oddnes into the result data turned out to be one cycle too many. The
-solution was to only test for the preamble in the "even" loop (after all,
-it can't occur in the "odd" loop anyway. But in a small case of "digital
-irony", the carry flag in the "even" loop indicates when the encoded bit
-was 1 (not zero) and in the "odd" loop, the carry flag corresponds to the
-encoded bit. Because we don't have to test for the preamble in the "odd"
-loop, we have one extra instruction of time to invert the bit after it's
-added to the result data, so the code just ends up composing the data in
-ones-complement of the actual value. And there is just enough time during
-the preamble pulse to store that value in the hub. Any cog that wants to
-pick up and process the value, will have to XOR it with $FFFF_FFFF first.
+The Even loop needs to check whether the PRADET pin is high, so that it
+can jump out and post the current subframe into the hub. It's not necessary
+to do this test in the Odd loop because the parity of a subframe is always
+even so after the last bit, execution is always in the Even loop.
 
-(*) I just realized that 48kHz may be a little too fast for the current
-code: the time-critical loops consist of 5 regular instructions (4 clocks)
-plus one WAITPxx instruction (minimum 6 clocks each) which is only 0.5ns
-less than 2*t at 48kHz. I would have liked at least one clock cycle
-(12.5ns) to spare but oh well. It's fairly easy to overclock a Propeller
-and fix the problem, you'd just have to modify the timing constant for
-the preamble detection. I may unroll the loops to make the code execute
-faster so 48kHz will work with the common Propeller configuration, but
-unrolling the loops (i.e. copy-pasting the instructions and removing the
-JMP insturctions) makes editing a pain, so I won't do that at least until
-I feel that I've gotten everything there is to get from the current code.
+However, because of that extra test plus the conditional jump, the Even
+loop has less time to check and process the oddness of the edge counter
+than the Odd loop, and in a small case of "digital irony", the Odd loop
+ended up with extra time after rotating the Carry flag into the result
+data, whereas the Even loop didn't have time to invert the bit, although
+it was supposed to do so.
+
+The solution was to let the Biphase decoder cog keep track of the resulting
+data in one's complement: the Even loop rotates the carry into the data
+without any further action and the Odd loop inverts the bit after it
+rotates it in. Then when the code processes an incoming preamble, it
+inverts all the bits. before it stores the BLKDET and LCHAN status into the
+data using MUX instructions.
+
+
+
+
+(*) 48kHz may be a little too fast for the current code: the time-critical
+loops take 325ns on a Propeller that runs at 80MHz, which is within 0.5ns
+of the 325.5 time that 2*t takes at 48kHz. I would have liked at least one
+clock cycle (12.5ns) to spare, but it is what it is. That means it will
+probably be necessary to overclock the Propeller and adjust the time
+constants to process a 48kHz input stream, but this is easy to accomplish
+by changing the crystal and modifying the _xinfreq parameter in the top
+module accordingly.
          
 }}
 
@@ -380,6 +400,7 @@ VAR
 PUB biphasedec(par_delay, par_psample)
 '' par_delay (long): Number of Propeller clocks in a preamble
 '' par_psample (pointer to long): Location to store constantly updating sample
+''
 
   pradet_delay := par_delay
   
@@ -392,22 +413,33 @@ DAT
 decodebiphase
                         ' Set up timer A, used to count pulses on XORIN
                         mov     ctra, ctraval
-                        mov     frqa, frqaval
+                        mov     frqa, #1
                         mov     phsa, #0
                         jmp     #evenloop
 
 preamble
                         ' Just after the detection of a preamble, test the pins
                         ' that tell us what kind of subframe this is.
-                        ' The only possible combinations are:
-                        ' * LCHAN is high and BLKDET is high (Left, first of block) -> C=0 Z=0
-                        ' * LCHAN is high and BLKDET is low  (Left, not first)      -> C=1 Z=0
-                        ' * LCHAN is low  and BLKDET is low  (Right)                -> C=0 Z=1
-                        ' We encode those flags into the (inverted) data that we post to
-                        ' the hub, in such a way that the parity remains the same. 
+                        ' Because BLKDET implies LCHAN, the only possible
+                        ' combinations are:
+                        ' * LCHAN=1, BLKDET=1   ->   C=0 Z=0   (Left, first subframe of block)
+                        ' * LCHAN=1, BLKDET=0   ->   C=1 Z=0   (Left)
+                        ' * LCHAN=0, BLKDET=0   ->   C=0 Z=1   (Right)
+                        '
+                        ' After we reverse the bits in the data to undo the ones-complement
+                        ' encoding by the Even and Odd loops, we encode those flags into the
+                        ' data, in pairs of bits so that the parity remains even. 
+                        '
+                        ' In order to encode the BLKDET value with a MUX, we have to make that
+                        ' MUX conditional upon Z=0. But if we would only encode the BLKDET bits
+                        ' in a conditional instruction, their values would be undefined for the
+                        ' right channel. To prevent this, we encode the channel first and we
+                        ' encode it as 4 bits (LCHAN as well as BLKDET). This will initialize
+                        ' the BLKDET bits to 0 for the right channel.
                         test    mask_BLKDET_LCHAN, ina wc,wz
-                        muxz    data, mask_ENC_LCHAN    ' Make (inverted) bits 0 for left ch
-              if_nz     muxnc   data, mask_ENC_BLKDET   ' Make (inverted) bits 0 for block det
+                        xor     data, vFFFF_FFFF        ' Undo one's complement encoding                        
+                        muxnz   data, mask_ENC_LFTBLK   ' Set four bits to 1 for left, 0=right
+              if_nz     muxnc   data, mask_ENC_BLKDET   ' If left ch, set two blkdet bits
 
                         wrlong  data, par               ' Write the data to the hub                             
                         waitpeq zero, mask_PRADET       ' Wait until end of preamble
@@ -441,10 +473,14 @@ evenloop
                         ' So instead, we simply rotate the carry flag into the result
                         ' and at the end of the subframe, all bits in the result are inverted.
                         rcr     data, #1                ' Rotate 1 if bit was 0, or vice versa 
-                        
+
+                        ' The Odd loop actually "starts" at the wait-instruction below this
+                        ' the following JMP, but by letting the odd loop jump here, both the
+                        ' even loop and the odd loop always take exactly 4 regular instructions
+                        ' plus a WAIT to execute.                        
+oddloop
               if_nc     jmp     #evenloop               ' Go to even loop if total still even
               
-oddloop
                         waitpne zero, mask_XORIN        ' Flank detected
                         test    one, phsa wc            ' C=1 if odd number of total flanks
 
@@ -460,18 +496,17 @@ oddloop
                         rcr     data, #1                ' Rotate 1 if bit was 1, or vice versa
                         xor     data, v8000_0000        ' Invert the inserted bit
                         
-              if_nc     jmp     #evenloop
                         jmp     #oddloop                                  
 
                         
                                       
 
 ctraval                 long    (%01010 << 26) | hw#pin_XORIN ' Count pos. edges on XORIN                   
-frqaval                 long    1
 
 zero                    long    0
 one                     long    1
 v8000_0000              long    $8000_0000
+vFFFF_FFFF              long    $FFFF_FFFF
 
                         ' The data stored here is the one's complement of the actual received
                         ' bits.
@@ -491,7 +526,7 @@ mask_XORIN              long    hw#mask_XORIN
 mask_PRADET             long    hw#mask_PRADET
 mask_BLKDET_LCHAN       long    hw#mask_BLKDET | hw#mask_LCHAN
 mask_ENC_BLKDET         long    hw#mask_ENC_BLKDET
-mask_ENC_LCHAN          long    hw#mask_ENC_LCHAN        
+mask_ENC_LFTBLK         long    hw#mask_ENC_LFTBLK        
 
                         fit
 
@@ -550,9 +585,18 @@ dploop
                         ' This happens while the mew subframe is already on its way,
                         ' but these signals won't be needed by other cogs until
                         ' they get to the end of the current subframe anyway.
-                        muxz    outa, dpmask_BLKDET                                              
+                        '
+                        ' In the middle of this, make sure we synchronize to the bit
+                        ' clock because 5 instructions have elapsed.
+                        muxz    outa, dpmask_BLKDET
+                        waitpne dpzero, dpmask_XORIN                             
                         muxc    outa, dpmask_LCHAN
 
+                        ' A few NOPs to stay in sync with the bit clock
+                        nop
+                        nop
+                        nop
+                        
                         ' NOTE: This would be a good time to read an updated value
                         ' of the timing constant from the hub (to make it possible to
                         ' run some sort of smart code that statistically determines what

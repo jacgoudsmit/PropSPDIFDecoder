@@ -17,9 +17,12 @@ OBJ
   biphase:      "biphasedec"
   ser:          "FullDuplexSerial"
 
+VAR
+  long  sample
+  
 PUB main
 
-  biphase.biphasedec(39)                        
+  biphase.biphasedec(39, @sample)                        
   
   ser.Start(hw#pin_RX, hw#pin_TX, %0000, 115200)        'requires 1 cog for operation
 
