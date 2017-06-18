@@ -15,6 +15,7 @@ OBJ
 
   hw:           "hardware"
   biphase:      "biphasedec"
+  play:         "audioout"
   ser:          "FullDuplexSerial"
 
 VAR
@@ -22,6 +23,10 @@ VAR
   
 PUB main
 
+  'cognew(@logicprobe, 0)
+  
+  play.Start(@sample)
+  
   biphase.biphasedec(39, @sample)                        
   
   ser.Start(hw#pin_RX, hw#pin_TX, %0000, 115200)        'requires 1 cog for operation
@@ -35,6 +40,23 @@ PUB main
   
   ser.Stop                                              'Stop the object
 
+DAT
+
+                        org 0
+logicprobe
+                        mov     dira, outputmask
+loop                        
+                        test    mask_PROBE, ina wc
+                        muxc    outa, mask_LED22
+                        muxnc   outa, mask_LED23
+                        jmp     #loop
+
+outputmask              long    |< hw#pin_LED22 | |< hw#pin_LED23
+mask_LED22              long    |< hw#pin_LED22
+mask_LED23              long    |< hw#pin_LED23
+mask_PROBE              long    |< hw#pin_0
+
+                                              
 CON     
 ''***************************************************************************
 ''* MIT LICENSE

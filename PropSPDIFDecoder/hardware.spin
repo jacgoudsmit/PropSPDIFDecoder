@@ -10,9 +10,9 @@ CON
 
   #0
 
+  pin_0
   pin_1
   pin_2
-  pin_3
   pin_XORIN                     ' XORed SPDIF input (SPDIN == SPDDEL)
   
   pin_4                         
@@ -22,23 +22,23 @@ CON
 
   pin_8
   pin_9
-  pin_10
-  pin_11
+  pin_AUDIOR                    ' Analog audio out on Demo board and HID board, right channel
+  pin_AUDIOL                    ' Analog audio out on Demo board and HID board, left  channel
 
   pin_12
   pin_13
   pin_14
   pin_15
 
-  pin_16
   pin_PRADET                    ' Preamble Detect (Also used internally) 
   pin_BLKDET                    ' Beginning of block Detect (Also used internally)                                               
   pin_LCHAN                     ' Left channel (Also used internally)
+  pin_19
 
   pin_20
   pin_21
-  pin_22
-  pin_23
+  pin_LED22                     ' LED on the Parallax HID board for QuickStart
+  pin_LED23                     ' LED on the Parallax HID board for QuickStart
 
   pin_24
   pin_25
@@ -51,16 +51,28 @@ CON
   pin_RX                        ' Serial receive
 
   ' Bitmasks for each of the pins
-  mask_XORIN  = |< pin_XORIN
-  mask_PRADET = |< pin_PRADET
-  mask_BLKDET = |< pin_BLKDET
-  mask_LCHAN  = |< pin_LCHAN
-  mask_LED26  = |< pin_LED26
-  mask_LED27  = |< pin_LED27
+  mask_XORIN    = |< pin_XORIN
+  mask_AUDIOL   = |< pin_AUDIOL
+  mask_AUDIOR   = |< pin_AUDIOR
+  mask_PRADET   = |< pin_PRADET
+  mask_BLKDET   = |< pin_BLKDET
+  mask_LCHAN    = |< pin_LCHAN
+  mask_LED26    = |< pin_LED26
+  mask_LED27    = |< pin_LED27
 
   ' Use pin 26 as debug output
-  pin_DEBUG = pin_LED26
-  mask_DEBUG = mask_LED26
+  pin_DEBUG     = pin_LED26
+  mask_DEBUG    = mask_LED26
+
+  ' Shift values for bit fields in subframe
+  sh_LCHAN      = 0
+  sh_BLKDET     = 2
+  sh_AUDIOLSB   = 4
+  sh_AUDIOMSB   = 27
+  sh_VALIDITY   = 28
+  sh_USERDATA   = 29
+  sh_CHANSTAT   = 30
+  sh_PARITY     = 31    
 
   ' The following masks are used to encode the preamble type into the
   ' data for each subframe, as stored into the hub by the Biphase decoder.
@@ -78,11 +90,10 @@ CON
   ' channel, the block-detect bits will be set to the BLKDET value for the
   ' left channel and will be unchanged (at the correct value of 0) for
   ' the right channel.  
-  mask_ENC_LFTBLK = %0000_0000_0000_1111 ' Bits to set for Lchan | block
-  mask_ENC_BLKDET = %0000_0000_0000_1100 ' Bits to set for block detect
-  mask_DEC_LCHAN  = %0000_0000_0000_0001 ' Bit to test for left channel
-  mask_DEC_BLKDET = %0000_0000_0000_0100 ' Bit to test for block detect
+  mask_ENC_LFTBLK = |< sh_BLKDET | |< (sh_BLKDET + 1) | |< sh_LCHAN | |< (sh_LCHAN + 1) 
+  mask_ENC_BLKDET = |< sh_BLKDET | |< (sh_BLKDET + 1)
 
+  
   
 PUB dummy
 {{ The module won't compile with at least one public function }}
