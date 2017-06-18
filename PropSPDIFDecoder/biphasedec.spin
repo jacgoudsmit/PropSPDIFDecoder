@@ -404,7 +404,7 @@ PUB biphasedec(par_delay, par_psample)
 
   pradet_delay := par_delay
   
-  cognew(@decodebiphase, @par_psample)
+  cognew(@decodebiphase, par_psample)
   cognew(@detectpreamble, @pradet_delay)
   
 DAT
