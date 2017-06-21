@@ -16,26 +16,49 @@ OBJ
   hw:           "hardware"
   biphase:      "biphasedec"
   play:         "audioout"
+  statuschan:   "statuschan"
   ser:          "FullDuplexSerial"
 
 VAR
   long  sample
+  byte  statusblock[192/8]
   
-PUB main
+PUB main | i, j, count, newcount            
 
   'cognew(@logicprobe, 0)
   
-  play.Start(@sample)
+  'play.Start(@sample)
   
   biphase.biphasedec(39, @sample)                        
-  
+
+  statuschan.Start(@sample)
+    
   ser.Start(hw#pin_RX, hw#pin_TX, %0000, 115200)        'requires 1 cog for operation
 
   waitcnt(cnt + (1 * clkfreq))                          'wait 1 second for the serial object to start
   
   ser.Str(STRING("Hello, World!"))                      'print a test string
   ser.Tx($0D)                                           'print a new line
-  
+
+  ' Dump the status channel in Hex
+  repeat
+    newcount := statuschan.GetBlock(@statusblock[0])
+
+    if (newcount <> count)
+      count := newcount
+
+      ser.Dec(count)
+      ser.Tx(32)
+          
+      repeat i from 0 to constant(192/8) - 1
+       ser.Hex(statusblock[i], 2)
+       ser.Tx(32)
+
+      ser.Tx($0D)
+
+    waitcnt(10_000 + cnt)
+             
+    
   waitcnt(cnt + (1 * clkfreq))                          'wait 1 second for the serial object to finish printing
   
   ser.Stop                                              'Stop the object
