@@ -65,14 +65,14 @@ CON
   mask_DEBUG    = mask_LED26
 
   ' Shift values for bit fields in subframe
-  sh_LCHAN      = 0
-  sh_BLKDET     = 2
-  sh_AUDIOLSB   = 4
-  sh_AUDIOMSB   = 27
-  sh_VALIDITY   = 28
-  sh_USERDATA   = 29
-  sh_CHANSTAT   = 30
-  sh_PARITY     = 31    
+  sf_LCHAN      = 0
+  sf_BLKDET     = 2
+  sf_AUDIOLSB   = 4
+  sf_AUDIOMSB   = 27
+  sf_VALIDITY   = 28
+  sf_USERDATA   = 29
+  sf_CHANSTAT   = 30
+  sf_PARITY     = 31    
 
   ' The following masks are used to encode the preamble type into the
   ' data for each subframe, as stored into the hub by the Biphase decoder.
@@ -90,8 +90,8 @@ CON
   ' channel, the block-detect bits will be set to the BLKDET value for the
   ' left channel and will be unchanged (at the correct value of 0) for
   ' the right channel.  
-  mask_ENC_LFTBLK = |< sh_BLKDET | |< (sh_BLKDET + 1) | |< sh_LCHAN | |< (sh_LCHAN + 1) 
-  mask_ENC_BLKDET = |< sh_BLKDET | |< (sh_BLKDET + 1)
+  mask_ENC_LFTBLK = |< sf_BLKDET | |< (sf_BLKDET + 1) | |< sf_LCHAN | |< (sf_LCHAN + 1) 
+  mask_ENC_BLKDET = |< sf_BLKDET | |< (sf_BLKDET + 1)
 
   
   

@@ -16,22 +16,28 @@ OBJ
   hw:           "hardware"
   biphase:      "biphasedec"
   play:         "audioout"
-  statuschan:   "statuschan"
+  statuschan:   "subchannel"
+  userchan:     "subchannel"
+  dump:         "dumpblock"
   ser:          "FullDuplexSerial"
 
 VAR
-  long  sample
+  long  subframe
   byte  statusblock[192/8]
+  byte  userdatablock[384/8]
+  long  dumpblock[384]
   
-PUB main | i, j, count, newcount            
+PUB main | i, count            
 
   'cognew(@logicprobe, 0)
   
-  'play.Start(@sample)
+  'play.Start(@subframee)
   
-  biphase.biphasedec(39, @sample)                        
+  biphase.biphasedec(39, @subframe)                        
 
-  statuschan.Start(@sample)
+  statuschan.Start(@subframe, hw#sf_CHANSTAT, true)
+  userchan.Start(@subframe, hw#sf_USERDATA, false)
+'  dump.Start(@subframe)
     
   ser.Start(hw#pin_RX, hw#pin_TX, %0000, 115200)        'requires 1 cog for operation
 
@@ -40,22 +46,64 @@ PUB main | i, j, count, newcount
   ser.Str(STRING("Hello, World!"))                      'print a test string
   ser.Tx($0D)                                           'print a new line
 
-  ' Dump the status channel in Hex
+{
+  ' Dump blocks in Hex
   repeat
-    newcount := statuschan.GetBlock(@statusblock[0])
+    newcount := dump.GetBlock(@dumpblock)
 
     if (newcount <> count)
       count := newcount
 
       ser.Dec(count)
       ser.Tx(32)
-          
-      repeat i from 0 to constant(192/8) - 1
-       ser.Hex(statusblock[i], 2)
-       ser.Tx(32)
 
+      repeat i from 0 to constant(384 - 1) step 2
+       'if (i & $E == 0)
+       '  ser.Tx(32)
+       'ser.Bin(dumpblock[i] >> hw#sf_CHANSTAT , 1)
+       ser.Hex(dumpblock[i], 8)
+       ser.Tx(32)
+       
       ser.Tx($0D)
 
+    waitcnt(10_000 + cnt)
+}
+
+{
+  ' Dump the user data channel in Hex
+  repeat
+    count := userchan.Get(@userdatablock, count)
+
+    ser.Dec(count)
+    ser.Tx(32)
+   
+    repeat i from 0 to constant(384/8 - 1)
+      if (i == constant(192/8 - 1))
+        ser.Str(string(13, "> "))
+      ser.Hex(userdatablock[i], 2)
+      ser.Tx(32)
+     
+    ser.Tx($0D)
+   
+  waitcnt(10_000 + cnt)
+
+  ' UNREACHABLE CODE
+}
+
+
+  ' Dump the status channel in Hex
+  repeat
+    count := statuschan.Get(@statusblock, count)
+
+    ser.Dec(count)
+    ser.Tx(32)
+     
+    repeat i from 0 to constant(192/8 - 1)
+     ser.Hex(statusblock[i], 2)
+     ser.Tx(32)
+     
+    ser.Tx($0D)
+     
     waitcnt(10_000 + cnt)
              
     

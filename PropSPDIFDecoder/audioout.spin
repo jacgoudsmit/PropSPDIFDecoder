@@ -69,15 +69,15 @@ loop
                         ' Copy the subframe to the sample
                         ' Make sure the parity is even and the data is valid
                         mov     sample, subframe wc
-                        test    sample, mask_VALIDITY wz
+                        test    sample, mask_sf_VALIDITY wz
         if_c_or_nz      jmp     #loop
                         
-                        shl     sample, #(31 - hw#sh_AUDIOMSB)
+                        shl     sample, #(31 - hw#sf_AUDIOMSB)
                         and     sample, filter          ' Cut off non-audio bits, probably not needed                        
                         add     sample, v8000_0000
 
                         ' Update only the channel that needs updating
-                        test    subframe, mask_LCHAN wc
+                        test    subframe, mask_sf_LCHAN wc
               if_c      mov     left, sample
               if_nc     mov     right, sample
 
@@ -102,8 +102,8 @@ v8000_0000              long    $8000_0000
 filter                  long    $FFFF0000
 
 mask_PRADET             long    |< hw#pin_PRADET
-mask_LCHAN              long    |< hw#sh_LCHAN
-mask_VALIDITY           long    |< hw#sh_VALIDITY
+mask_sf_LCHAN           long    |< hw#sf_LCHAN
+mask_sf_VALIDITY        long    |< hw#sf_VALIDITY
 
                         fit
                         
