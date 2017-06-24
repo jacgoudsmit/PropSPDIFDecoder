@@ -18,14 +18,12 @@ OBJ
   play:         "audioout"
   statuschan:   "subchannel"
   userchan:     "subchannel"
-  dump:         "dumpblock"
   ser:          "FullDuplexSerial"
 
 VAR
   long  subframe
   byte  statusblock[192/8]
   byte  userdatablock[384/8]
-  long  dumpblock[384]
   
 PUB main | i, count            
 
@@ -45,29 +43,6 @@ PUB main | i, count
   
   ser.Str(STRING("Hello, World!"))                      'print a test string
   ser.Tx($0D)                                           'print a new line
-
-{
-  ' Dump blocks in Hex
-  repeat
-    newcount := dump.GetBlock(@dumpblock)
-
-    if (newcount <> count)
-      count := newcount
-
-      ser.Dec(count)
-      ser.Tx(32)
-
-      repeat i from 0 to constant(384 - 1) step 2
-       'if (i & $E == 0)
-       '  ser.Tx(32)
-       'ser.Bin(dumpblock[i] >> hw#sf_CHANSTAT , 1)
-       ser.Hex(dumpblock[i], 8)
-       ser.Tx(32)
-       
-      ser.Tx($0D)
-
-    waitcnt(10_000 + cnt)
-}
 
 {
   ' Dump the user data channel in Hex
