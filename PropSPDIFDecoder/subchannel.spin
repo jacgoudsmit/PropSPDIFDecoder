@@ -33,15 +33,10 @@ PUB Start(par_psubframe, par_bit, par_leftonly)
 '' Starts the decoder
 ''
 '' par_psubframe (pointer to long): pointer to live updated SPDIF subframe
-'' par_pdata (pointer to array of bytes): array to update from subchannel
 '' par_bit (long): bit number of subchannel (see hardware module)
 '' par_leftonly: (boolean long) Handle only the left-channel subframes 
 '' 
 '' result (long): lock ID to use for accessing the data, -1 if start failed
-''
-'' The data array should have enough space for the data: 192 bits (24 bytes)
-'' for the Channel Status, or 384 bits (48 bytes) for the User Data.
-'' 
 
   ' Check if we're already running. If so, stop before restarting.
   Stop
@@ -132,8 +127,11 @@ ins_initrdlong          rdlong  parameters, copyptr
                          
                         ' Backup the instruction that rotates the bit into the data
                         mov     restore_ins_rcrbits1, ins_rcrbits1
-                        mov     blkcounter, #0
 
+                        ' Set up timer A to count blocks
+                        mov     ctra, ctraval
+                        mov     frqa, #1
+                        
                         ' Initialize the counters
                         call    #nextblock                        
 
@@ -208,12 +206,6 @@ ins_rcrbits1            rcr     bits, #1                ' Rotate it into the bit
                         ' data from this block into the hub, but only if an entire block
                         ' came in.
 saveblocktohub
-                        ' Increase the block counter in the cog.
-                        ' If we end up not being able to copy this block to the hub for some
-                        ' reason, the discontinuity can be detected by other cogs that use
-                        ' the hub data.
-                        add     blkcounter, #1
-
                         ' Check if an entire block was received
                         ' If not, discard block and return
                         tjnz    sfcounter, #nextblock
@@ -242,7 +234,8 @@ ins_wrlongbitsp         wrlong  bits, copyptr
                         djnz    copycounter, #copyloop                         
 
                         ' Update the block counter in the hub
-                        wrlong  blkcounter, gpblockcounter
+                        mov     copycounter, phsa
+                        wrlong  copycounter, gpblockcounter
 
                         ' Clear the lock                        
                         lockclr glockid
@@ -259,6 +252,7 @@ saveblocktohub_ret      ret
 ' Constants
 zero                    long    0
 d1                      long    1 << 9
+ctraval                 long    (%01010 << 26) | hw#pin_BLKDET ' Count pos. edges on BLKDET
 mask_PRADET             long    hw#mask_PRADET
 mask_XORIN              long    hw#mask_XORIN
 mask_sf_BLKDET          long    |< hw#sf_BLKDET
@@ -276,7 +270,6 @@ parameters_end
 
 ' Variables
 subframe                res     1                       ' Actual subframe value read from hub        
-blkcounter              res     1                       ' Local block counter
 sfcounter               res     1                       ' Subframe countdown
 bitcounter              res     1                       ' Stored bits per longword countdown
 copyptr                 res     1                       ' Destination address during copy                        

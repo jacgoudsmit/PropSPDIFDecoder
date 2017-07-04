@@ -35,7 +35,6 @@ PUB main | i, count
 
   statuschan.Start(@subframe, hw#sf_CHANSTAT, true)
   userchan.Start(@subframe, hw#sf_USERDATA, false)
-'  dump.Start(@subframe)
     
   ser.Start(hw#pin_RX, hw#pin_TX, %0000, 115200)        'requires 1 cog for operation
 
@@ -44,43 +43,34 @@ PUB main | i, count
   ser.Str(STRING("Hello, World!"))                      'print a test string
   ser.Tx($0D)                                           'print a new line
 
-{
-  ' Dump the user data channel in Hex
   repeat
+    ' Dump one line of user data (only half of the data is shown)
     count := userchan.Get(@userdatablock, count)
 
     ser.Dec(count)
-    ser.Tx(32)
+    ser.Str(string("U "))
    
-    repeat i from 0 to constant(384/8 - 1)
-      if (i == constant(192/8 - 1))
+    repeat i from 0 to constant(192/8 - 1)
+      if (i == constant(192/8))
         ser.Str(string(13, "> "))
       ser.Hex(userdatablock[i], 2)
       ser.Tx(32)
      
     ser.Tx($0D)
    
-  waitcnt(10_000 + cnt)
-
-  ' UNREACHABLE CODE
-}
-
-
-  ' Dump the status channel in Hex
-  repeat
+    ' Dump onle line of status channel
     count := statuschan.Get(@statusblock, count)
 
     ser.Dec(count)
-    ser.Tx(32)
+    ser.Str(string("C "))
      
     repeat i from 0 to constant(192/8 - 1)
      ser.Hex(statusblock[i], 2)
      ser.Tx(32)
      
     ser.Tx($0D)
-     
-    waitcnt(10_000 + cnt)
-             
+
+  ' UNREACHABLE CODE             
     
   waitcnt(cnt + (1 * clkfreq))                          'wait 1 second for the serial object to finish printing
   

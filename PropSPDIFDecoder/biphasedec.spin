@@ -413,13 +413,30 @@ DAT
 decodebiphase
                         ' Set up timer A, used to count pulses on XORIN
                         mov     ctra, ctraval
-                        mov     frqa, #1
-                        mov     phsa, #0
-                        jmp     #evenloop
+                        mov     frqa, #1                        
+
+                        ' Start by waiting for the end of a preamble so we properly lock
+                        ' to the stream.
+                        waitpeq zero, mask_PRADET       ' Make sure not in preamble already
+                        waitpne zero, mask_PRADET       ' Wait for start of preamble
+                        waitpeq zero, mask_PRADET       ' Wait for end of preamble
+
+                        ' After this, we jump into the even loop so make sure to create the
+                        ' correct start condition: phsa must be even after the next pulse
+                        ' (which is the starting pulse of the first data bit in the subframe).                        
+                        waitpne zero, mask_XORIN        ' Wait for flank
+                        mov     phsa, #0 wc             ' Make sure phsa is even and C=0
+
+                        ' Jump into the main loop, skipping the preamble test (we know
+                        ' it's false anyway)
+                        ' The nop is needed to stay in sync with the bit clock: there should
+                        ' always be 5 regular instructions between two WAITPxx instructions.
+                        nop                             ' Make sure the timing is right
+                        jmp     #entermainloop          ' Let's go! 
 
 preamble
                         ' Just after the detection of a preamble, test the pins
-                        ' that tell us what kind of subframe this is.
+                        ' that tell us what kind of subframe we just finished.
                         ' Because BLKDET implies LCHAN, the only possible
                         ' combinations are:
                         ' * LCHAN=1, BLKDET=1   ->   C=0 Z=0   (Left, first subframe of block)
@@ -466,6 +483,8 @@ evenloop
                         test    mask_PRADET, ina wz     ' Z=0 if preamble detected
               if_nz     jmp     #preamble                    
 
+                        ' After initialization, we enter the main loop here
+entermainloop
                         ' NOTE: C=1 if the encoded bit was 0 (!)
                         '
                         ' We don't have time to manipulate the data in a such a way
@@ -545,12 +564,64 @@ detectpreamble
                         ' Set up timer A, used to count pulses on XORIN
                         mov     ctra, dpctraval
                         mov     frqa, dpfrqaval
-                        mov     phsa, dpreseta
                         
                         ' Set up timer B, used for preamble detection
                         mov     ctrb, dpctrbval
-                        mov     frqb, dpfrqbval
                         mov     phsb, dpresetb
+
+                        ' Make sure we always lock on to the FIRST long pulse of a preamble,
+                        ' not the SECOND long pulse.
+                        '
+                        ' We do this by waiting for the two consecutive long pulses of an
+                        ' M preamble before falling through to the main loop. But we measure
+                        ' time by comparing the CNT register instead of using a timer, so
+                        ' that other cogs that are waiting for the PRADET signal don't get
+                        ' triggered just yet.
+                        '                        
+                        ' As usual, the loop is tuned to exactly 6 instructions (including
+                        ' the WAITPxx) 
+                        neg     dpcount, dpcount        ' Make time limit negative
+                        mov     dpprevtime, cnt         ' Make sure no false triggers
+dplockloop
+                        waitpne dpzero, dpmask_XORIN                         
+                        mov     dptime, cnt
+                        sub     dpprevtime, dptime      ' Get negative time difference
+                        cmp     dpcount, dpprevtime wc  ' C=0 if long pulse
+                        mov     dpprevtime, dptime
+              if_c      jmp     #dplockloop                                                 
+
+                        ' At this point, we determined that the pulse we just measured
+                        ' is a long one. Make sure the next pulse is a long one too.
+                        ' This only happens during an M preamble but one of those will
+                        ' inevitably show up in a stereo signal.
+                        '
+                        ' The following is exactly identical to the above; if the time
+                        ' difference isn't long (i.e. this is not an M preamble or we
+                        ' just caught the second pulse instead of the first one), the
+                        ' search starts all over. 
+                        waitpne dpzero, dpmask_XORIN                         
+                        mov     dptime, cnt
+                        sub     dpprevtime, dptime      ' Get negative time difference
+                        cmp     dpcount, dpprevtime wc  ' C=0 if long pulse
+                        mov     dpprevtime, dptime
+              if_c      jmp     #dplockloop                                                 
+
+                        ' At this point, we've gotten two long pulses from an M preamble.
+                        ' We will drop through into the main loop now, but we have to
+                        ' start timer B (the one that generates the PRADET signal) first.
+                        ' We can't do this right away because we have to stay in sync
+                        ' with the clock and it's time for a WAITPxx. So we start the
+                        ' timer near the end of the first data bit after the WAITPxx.
+                        ' The timing is going to be all wrong to detect a preamble in
+                        ' the next bit, but we already know there's not going to be one,
+                        ' and this code won't generate a false positive on the preamble
+                        ' detection. That's good enough.
+                        waitpne dpzero, dpmask_XORIN                                  
+                        nop
+                        nop
+                        nop
+                        nop
+                        mov     frqb, dpfrqbval
 
 dploop
                         waitpne dpzero, dpmask_XORIN
@@ -559,68 +630,56 @@ dploop
               if_z      mov     phsb, dpresetb          ' Reset timer B, 8 cycles too late
 
                         add     dpcount, #2             ' Expect 2 flanks for B preamble                        
-              if_z      jmp     #dploop
+              if_z      jmp     #dploop                 ' Loop if no preamble detected
 
                         ' Preamble detected.                        
                         waitpne dpzero, dpmask_XORIN
-                        cmp     dpcount, phsa wz        ' Z=1 C=0 for B; otherwise M or W
+
+                        cmp     dpcount, phsa wz        ' Z=1 for B; otherwise M or W
                         cmp     dpdetectm, phsb wc      ' C=1 for M; otherwise B or W
 
-                        ' Reset timer B at the exact same time (relative to the previous
-                        ' pulse on XORIN) as usual, but use a reset-value of 0 to compensate
-                        ' for the unusually long time we spend in the next few instructions.
-                        ' Effectively, this switches the preamble detection off until the next
-                        ' incoming pulse on XORIN, but that's okay, we're not expecting one
-                        ' for a while anyway
-                        mov     phsb, #0
-                                                        
+                        ' At this point, C=1 for B preamble only, but we're going to use it
+                        ' to indicate the left channel so we should set it for B preambles too.
               if_z      cmp     dpzero, #1 wc           ' Set C if Z=1
 
                         ' At this point:
                         ' * Z=1 indicates B preamble
                         ' * C=0 indicates W preamble
                         ' * C=1 and Z=0 indicate M preamble
-                        
+
+                        ' We must reset the PRADET signal right here so that other cogs who
+                        ' wait for it, can do a wait for XORIN afterwards to sync up with the
+                        ' first bit of the next subframe. 
+                        mov     phsb, #0
+                        nop                        
+                                                        
+                        waitpne dpzero, dpmask_XORIN                             
+
+                        ' We're now in the first bit of the next subframe.
+                        '
                         ' Set the channel block detect and channel outputs.
                         ' This happens while the mew subframe is already on its way,
                         ' but these signals won't be needed by other cogs until
                         ' they get to the end of the current subframe anyway.
-                        '
-                        ' In the middle of this, make sure we synchronize to the bit
-                        ' clock because 5 instructions have elapsed.
                         muxz    outa, dpmask_BLKDET
-                        waitpne dpzero, dpmask_XORIN                             
                         muxc    outa, dpmask_LCHAN
 
                         ' A few NOPs to stay in sync with the bit clock
                         nop
                         nop
-                        nop
                         
-                        ' NOTE: This would be a good time to read an updated value
-                        ' of the timing constant from the hub (to make it possible to
-                        ' run some sort of smart code that statistically determines what
-                        ' it should be or to let the user influence it manually),
-                        ' but if we replace it with the wrong value, we may never
-                        ' get back here. I'll have to think about how to solve this
-                        ' and also about how to detect when the input goes dead, which
-                        ' gets everyone stuck in WAITPxx instructions.
+                        ' NOTE: This would be a good time to statistically determine the
+                        ' correct reset-value of timer B, if possible.
                         
-                        ' NOTE: we end this loop late. That's fine; there won't be another
-                        ' preamble any time soon and timer B won't expire because we set
-                        ' PHSB to a special value.
                         jmp     #dploop                        
                         
                         
 dpctraval               long    (%01010 << 26) | hw#pin_XORIN ' Count pos. edges on XORIN                   
 dpfrqaval               long    1
-dpreseta                long    0
 
 dpctrbval               long    (%00100 << 26) | hw#pin_PRADET
 dpfrqbval               long    1
 dpresetb                long    $8000_0000 + 8          ' Subtract 3*t cycles from this. "+8" compensates for resetting 2 instructions late
-
-dpcount                 long    0
 
 dpzero                  long    0
 dpdetectm               long    $8000_0000              ' Add 3*t cycles to this
@@ -630,6 +689,10 @@ dpmask_XORIN            long    hw#mask_XORIN
 dpmask_PRADET           long    hw#mask_PRADET
 dpmask_BLKDET           long    hw#mask_BLKDET
 dpmask_LCHAN            long    hw#mask_LCHAN        
+
+dpcount                 res     1                       ' Counter used for multiple purposes
+dptime                  res     1                       ' Time storage during init                        
+dpprevtime              res     1                       ' Time storage during init                        
 
                         fit
                                                 
