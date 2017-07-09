@@ -23,13 +23,6 @@
   Oh well. It's only a demo. The project is not intended to even do audio,
   but this module proves that the audio data is processed correctly by the
   Biphase decoder.
-
-  PS For some reason that I can't quite figure out, sometimes the audio
-  gets sent out WAY loud and WAY distorted. A reboot fixes the problem.
-  I think this has to do with us not resetting the PHSA/PHSB or something,
-  so that sometimes the counters and the code get into some race condition.
-  I may look at it in the future but I'm open to suggestions if you
-  have one.
 }}
 
 OBJ
@@ -60,8 +53,8 @@ audiocog
 
 loop
                         ' Wait for the next subframe
-                        waitpeq zero, mask_PRADET
                         waitpne zero, mask_PRADET
+                        waitpeq zero, mask_PRADET
 
                         ' Get subframe from the sample pointer                        
                         rdlong  subframe, par
@@ -78,15 +71,9 @@ loop
 
                         ' Update only the channel that needs updating
                         test    subframe, mask_sf_LCHAN wc
-              if_c      mov     left, sample
-              if_nc     mov     right, sample
+              if_c      mov     frqa, sample
+              if_nc     mov     frqb, sample
 
-                        ' Write both timers always (though this doesn't
-                        ' appear necessary and could generate more
-                        ' quantization noise)
-                        mov     frqa, left
-                        mov     frqb, right
-                        
                         jmp     #loop
 
 sample                  long    0
@@ -99,7 +86,7 @@ outputmask              long    hw#mask_AUDIOL | hw#mask_AUDIOR
 ctraval                 long    (%00110 << 26) | hw#pin_AUDIOL
 ctrbval                 long    (%00110 << 26) | hw#pin_AUDIOR
 v8000_0000              long    $8000_0000
-filter                  long    $FFFF0000
+filter                  long    $FFFF_0000
 
 mask_PRADET             long    |< hw#pin_PRADET
 mask_sf_LCHAN           long    |< hw#sf_LCHAN
