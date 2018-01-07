@@ -1,4 +1,23 @@
-''file: tx.spin
+''***************************************************************************
+''* Serial data transmitter
+''* Copyright (C) 2018 Barry Meaker and Jac Goudsmit
+''*
+''* TERMS OF USE: MIT License. See bottom of file.                                                            
+''***************************************************************************
+''
+'' This module implements a fast serial transmitter. It cannot receive, and
+'' it doesn't implement flow control.
+''
+'' A cog is dedicated to transmitting data on a single pin, based on a
+'' command that's passed through a single longword. That way, it can easily
+'' be used from Spin as well as PASM.
+''
+'' Following are the comments from Barry Meaker's original code. Things have
+'' been optimized since he did his measurements, so things might work even
+'' faster now. On the other hand, the new features may also have a small
+'' negative impact on performance.
+''
+
 {{
 ' This routine is optimized to transmit a zero-terminated string
 '
@@ -13,7 +32,8 @@
 ' 921600 baud takes about 1mS.
 '
 '-----------------REVISION HISTORY-----------------
-' v1.0 - 4/27/2011 original version by Barry Meaker   
+' v1.0 - 2011-04-27 Original version by Barry Meaker
+' v2.0 - 2018-01-06 Various enhancements by Jac Goudsmit
 }}
 CON
 
@@ -112,8 +132,7 @@ fasttx                  mov     tmp, par                    'get the shared RAM 
                         add     tmp, #4
                         rdlong  buf_ptr, tmp                'get the buffer pointer
 
-init                    mov     pin_val, #0
-                        or      pin_val, txpin              'set the bit for txpin high
+init                    mov     pin_val, txpin              'set the bit for txpin high
                         mov     dira, pin_val               'set the direction of txpin to output
                         mov     outa, pin_val               'set txpin high
                             
@@ -132,18 +151,22 @@ byte_loop               rdbyte  tx_data, byte_ptr wz         'read the byte to t
 
                         mov     bit_cnt, #10                '1 start, 8 data, 1 stop
                         mov     wait_time, cnt              'read the current count
-                        add     wait_time, #25              'add a small time to it
+                        add     wait_time, #bytetime        'add a small time to it
 
-tx_loop                 shr     tx_data, #1  wc             'shift the bit to transmit into carry
-                 if_c   or      pin_val, txpin
-                 if_nc  andn    pin_val, txpin
-                        waitcnt wait_time, bittime          'wait until time for this bit
-                        mov     outa, pin_val               'change the tx pin
+tx_loop                 waitcnt wait_time, bittime          'wait until time for this bit
+                        shr     tx_data, #1  wc             'shift the bit to transmit into carry
+                        muxc    outa, pin_val
                         djnz    bit_cnt, #tx_loop           'loop if more bits to transmit             
-                        waitcnt wait_time, bittime          'allow a full stop bit
+
+                        ' At this point, the stop bit is still on the line. That's okay.
 
                         add     byte_ptr, #1                'point to the next byte
                         jmp     #byte_loop
+
+'
+' Initialized data
+'
+bytetime                long    25                      ' Extra clocks between bytes (min=9)                           
 
 '
 ' Uninitialized data
