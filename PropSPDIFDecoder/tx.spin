@@ -13,10 +13,9 @@
 '' be used from Spin as well as PASM.
 ''
 '' Following are the comments from Barry Meaker's original code. Things have
-'' been optimized since he did his measurements, so things might work even
-'' faster now. On the other hand, the new features may also have a small
-'' negative impact on performance.
-''
+'' been optimized since he did his measurements, so things work even faster
+'' now. The maximum bit rate is 4Mbps. The maximum byte rate is approximately
+'' 238805 bytes per second.
 
 {{
 ' This routine is optimized to transmit a zero-terminated string
@@ -151,22 +150,23 @@ byte_loop               rdbyte  tx_data, byte_ptr wz         'read the byte to t
 
                         mov     bit_cnt, #10                '1 start, 8 data, 1 stop
                         mov     wait_time, cnt              'read the current count
-                        add     wait_time, #bytetime        'add a small time to it
+                        add     wait_time, #9               'value 9 immediately ends waitcnt
 
+                        ' When execution falls into the bit loop below, the first instruction
+                        ' must be a waitcnt. The wait time of 9 cycles in the instruction above
+                        ' accomplishes that the waitcnt immediately exits.
+                                                 
 tx_loop                 waitcnt wait_time, bittime          'wait until time for this bit
                         shr     tx_data, #1  wc             'shift the bit to transmit into carry
                         muxc    outa, pin_val
-                        djnz    bit_cnt, #tx_loop           'loop if more bits to transmit             
+                        djnz    bit_cnt, #tx_loop           'loop if more bits to transmit
+                        waitcnt wait_time, bittime          'make sure stop bit at least 1 bit time                                                             
 
                         ' At this point, the stop bit is still on the line. That's okay.
 
                         add     byte_ptr, #1                'point to the next byte
                         jmp     #byte_loop
 
-'
-' Initialized data
-'
-bytetime                long    25                      ' Extra clocks between bytes (min=9)                           
 
 '
 ' Uninitialized data
