@@ -121,7 +121,7 @@ CON
   sh_A12                        '|
   sh_A13                        '|
   sh_A14                        '|
-  sh_A15                        '/
+  sh_AH                        '/
 
   sh_L0                         '\
   sh_L1                         '|
@@ -136,13 +136,13 @@ CON
   sh_L8                         '|
   sh_L9                         '|
   sh_L10                        '|
-  sh_L11                        '/
+  sh_LH                         '/
 
   sh_Q0                         '\
-  sh_Q1                         '/ Output format
+  sh_QH                         '/ Output format
 
   sh_I0                         '\
-  sh_I1                         '/ Input format
+  sh_IH                         '/ Input format
 
 
   ' Bits in the command word for the reset command
@@ -171,7 +171,7 @@ CON
   sh_T16                        '|
   sh_T17                        '|
   sh_T18                        '|
-  sh_T19                        '/
+  sh_TH                        '/
   
   sh_RESET20                    '\
   sh_RESET21                    '| Reserved
@@ -181,7 +181,7 @@ CON
   sh_P1                         '|
   sh_P2                         '| Pin number for TXD
   sh_P3                         '|
-  sh_P4                         '/
+  sh_PH                         '/
 
   sh_C                          ' Enable CTS on pin+1
   sh_RESET29                    ' Always 1 for reset                        
@@ -319,234 +319,219 @@ DAT
 
                         org  0
 
-                        ' The lowest locations of cog memory are used as a jump table once the
-                        ' main loop is running.
-                        ' The JMP instructions aren't actually executed, they're just a neat
-                        ' reminder of what these locations are used for.
-fasttx
-                        jmp     #init                   ' 00_00=char/string (Replaced below)
-                        jmp     #init_char_filter       ' 00_01=char/filtered string
-                        jmp     #init_reset             ' 00_10=reset baud rate, pin number
-                        jmp     #init_res_cts           ' 00_11=reset with CTS
-                        jmp     #init_byte_dec          ' 01_00=byte/unsigned decimal                                   
-                        jmp     #init_byte_sgd          ' 01_01=byte/signed decimal
-                        jmp     #init_byte_hex          ' 01_10=byte/hexadecimal
-                        jmp     #init_byte_bin          ' 01_11=byte/binary
-                        jmp     #init_word_dec          ' 10_00=word/unsigned decimal
-                        jmp     #init_word_sgd          ' 10_01=word/signed decimal
-                        jmp     #init_word_hex          ' 10_10=word/hexadecimal
-                        jmp     #init_word_bin          ' 10_11=word/binary
-                        jmp     #init_long_dec          ' 11_00=long/unsigned decimal
-                        jmp     #init_long_sgd          ' 11_01=long/signed decimal
-                        jmp     #init_long_hex          ' 11_10=long/hexadecimal
-                        jmp     #init_long_bin          ' 11_11=long/binary
-init
-                        movs    0, #init_char_string
 
+                        '======================================================================
+                        ' Initialization
+                        
+fasttx
                         ' Read the address of the command long
                         rdlong  pcmd, PAR
                         jmp     #readcmd
 
-                        ' Process an item
+
+                        '======================================================================
+                        ' Item loop
+                        '                        
+                        ' The following code processes items (bytes, words, longs) until the
+                        ' command is done
+                        ' The instructions are modified depending on input mode, output mode,
+                        ' length parameter and runtime state.
+                         
 itemloop
                         ' Load an item
                         ' This is changed to the appropriate RD... instruction
 ins_load                rdbyte  x, address wz
 
-                        ' Take action if it was zero
+                        ' Take action if the item was zero
                         ' If count was initialized to nonzero, this is changed to a NOP  
 ins_zeroitem  if_z      jmp     #endcmd
 
                         ' Process the item
                         ' This is replaced depending on the output format
-ins_process             jmpret  0, #0
+ins_process             jmpret  (0), #(0)
 
                         ' TODO: add code here to print separator for dec/sgd/hex/bin
+
+                        ' Bump source address
+                        add     address, bytesperitem
                         
                         ' Next item
-                        add     address, bytesperitem
+                        ' If the length parameter was zero, the djnz is replaced by a jmp
 ins_nextitem            djnz    count, #itemloop
 
-                        ' Finish a command by writing zero to the command long.
-endcmd
-                        wrlong  zero, pcmd                        
 
-                        ' Get command
-readcmd                 rdlong  x, pcmd wz
+                        '======================================================================
+                        ' Command finished
+                        '
+                        ' Execution lands here when a command is done
+                        
+endcmd
+                        wrlong  zero, pcmd              ' Clear command code                        
+
+
+                        '======================================================================
+                        ' Get and process incoming command
+
+readcmd
+                        rdlong  command, pcmd wz
               if_z      jmp     #readcmd
 
-                        ' Save address and length
-                        mov     address, x
-                        mov     count, x
-                        shl     count, #( 31 - sh_L11)
-                        shr     count, #((31 - sh_L11) + sh_L0) wz
+                        ' Save address
+                        mov     address, command
+                        'shr     address, #sh_A0
+                        and     address, mask_address
+                        
+                        mov     count, command
+                        shr     count, #sh_L0
+                        and     count, mask_count wz                        
 
-                        ' If count is zero, stop at a zero-item
+                        ' If count is zero, stop at a zero-item, and loop unconditionally
+                        ' If count is nonzero, use a DJNZ to count down the items
               if_z      mov     ins_zeroitem, ins_nop
               if_z      mov     ins_nextitem, ins_djnzitemloop
               if_nz     mov     ins_zeroitem, ins_ifjmpend
               if_nz     mov     ins_nextitem, ins_jmpitemloop                                               
 
-                        ' Get input mode and jump to that mode's initialization via the jump
-                        ' table.
-                        shr     x, #sh_I0   
+                        ' Get output mode
+                        mov     outmode, command
+                        shr     outmode, #sh_Q0
+                        and     outmode, mask_outmode                        
+                        
+                        ' Get input mode
+                        ' Select the output mode initializer jump table based on whether the
+                        ' input mode is %00 or not.
+                        mov     inmode, command
+                        shr     inmode, #sh_I0
+                        and     inmode, mask_inmode wz  ' Z=1 for character/reset mode
+              if_z      movs    ins_outmode_tab, jmptab_outmode_zero
+              if_nz     movs    ins_outmode_tab, jmptab_outmode_nonzero               
+
+                        ' Execute input mode initializer based on jump table 
+                        mov     x, inmode
+                        add     x, #jmptab_inmode
+                        jmp     x
+
+                        ' All input mode initializers jump to this location
+                        ' Execute output mode initializer based on jump table
+                        ' The table that is used depends on whether the input mode is
+                        ' %00 or not.
+end_inmode_init
+                        mov     x, outmode
+ins_outmode_tab         add     x, #(0)                 ' Modified depending on inmode 
                         jmp     x
 
 
-                        
-                        ' Initialization for each input/output mode
+                        '======================================================================
+                        ' Input-mode initializers
+                        '
+                        ' These must run before the output initializers because they depend on
+                        ' each other's data.
+
+                        '----------------------------------------------------------------------                        
+                        ' II=%00: Init for processing characters
+                        ' Note, in case of a reset, the character initializer is useless,
+                        ' but it's more efficient to just execute them here, with a penalty
+                        ' of wasted clock cycles when resetting, as compared to doing an
+                        ' extra check to skip this when we're initializing string mode.
+                        '
+                        ' Input mode for characters is identical to input for bytes,
+                        ' so fall through to the initializer for bytes
+init_char
+
+                        '----------------------------------------------------------------------
+                        ' II=%01: Init for processing bytes
+init_byte
+                        mov     bytesperitem, #1        ' Each iteration goes to next byte
+                        mov     ins_load, ins_rdbyte    ' Load data as byte
+                        jmp     #end_inmode_init
+
+                        '----------------------------------------------------------------------                        
+                        ' II=%10: Init for processing words
+init_word
+                        mov     bytesperitem, #2        ' Each iteration goes to next word
+                        mov     ins_load, ins_rdword    ' Load data as word
+                        jmp     #end_inmode_init
+
+                        '----------------------------------------------------------------------
+                        ' II=%11: Init for processing longs
+init_long
+                        mov     bytesperitem, #4        ' Each iteration goes to next word
+                        mov     ins_load, ins_rdlong    ' Load data as long
+                        jmp     #end_inmode_init
 
 
-                        ' IIQQ=%0000: Init for printing a string         
+                        '======================================================================
+                        ' Output mode initializers for input mode %00
+
+                        '----------------------------------------------------------------------
+                        ' QQ=%00 for II=00: Init for printing a string         
 init_char_string
                         mov     ins_process, ins_call_char
-                        call    #init_char
                         jmp     #itemloop
 
-                        
-                        ' IIQQ=%0001: Init for printing a filtered string 
+
+                        '----------------------------------------------------------------------                        
+                        ' QQ=%01 for II=00: Init for printing a filtered string 
 init_char_filter       
                         mov     ins_process, ins_call_filter ' Filter byte, send to output
-                        call    #init_byte
                         jmp     #itemloop                                       
 
-                        
-                        ' IIQQ=%0010: Init bit rate and pin number
-init_reset
-                        mov     bittime, x 
-                        shl     bittime, #( 31 - sh_T19)
-                        shr     bittime, #((31 - sh_T19) + sh_T0)
 
-                        shl     x, #( 31 - sh_P4)
-                        shr     x, #((31 - sh_P4) + sh_P0)
+                        '----------------------------------------------------------------------                        
+                        ' QQ=%10 for II=00: Init bit rate and pin number
+init_reset
+                        mov     bittime, command
+                        shr     bittime, #sh_T0
+                        and     bittime, mask_bittime 
+
+                        mov     x, command
+                        shr     x, #sh_P0
+                        and     x, mask_pinnum
                         mov     bitmask, #1
                         shl     bitmask, x
                         mov     OUTA, bitmask
                         mov     DIRA, bitmask
-                        
+
+                        ' All done here                        
                         jmp     #endcmd
 
-                        
-                        ' IIQQ=%0011: Init bit rate and pin number with CTS handshaking
+
+                        '----------------------------------------------------------------------
+                        ' Q=%11 for II=00: Init bit rate and pin number, enable CTS handshake
+                        '
+                        ' This is not implemented because the Prop plug doesn't have CTS broken
+                        ' out anyway.
+                        ' Basically, to implement this, the bit mask for the CTS pin should be
+                        ' initialized here and the main loop should check wait for that pin to
+                        ' be high before sending a byte in the main loop.
 init_res_cts
-                        jmp     #init_reset             ' Not implemented, do regular reset
+                        jmp     #init_reset             ' Just handle this as a normal reset
 
 
-                        ' IIQQ=%0100: Init for printing byte as decimal value                        
-init_byte_dec
-                        call    #init_byte
-                        jmp     #init_dec
-
-
-                        ' IDQQ=%0101: Init for printing byte as signed decimal
-init_byte_sgd
-                        call    #init_byte
-                        jmp     #init_sgd
-
-
-                        ' IDQQ=%0110: Init for printing byte as hex                        
-init_byte_hex
-                        call    #init_byte
-                        jmp     #init_hex                        
-
-
-                        ' IDQQ=%0111: Init for printing byte as binary
-init_byte_bin
-                        call    #init_byte
-                        jmp     #init_hex
-
-
-                        ' IIQQ=%1000: Init for printing word as decimal value                        
-init_word_dec
-                        call    #init_word
-                        jmp     #init_dec
-
-
-                        ' IDQQ=%1001: Init for printing word as signed decimal
-init_word_sgd
-                        call    #init_word
-                        jmp     #init_sgd
-
-
-                        ' IDQQ=%1010: Init for printing word as hex                        
-init_word_hex
-                        call    #init_word
-                        jmp     #init_hex                        
-
-
-                        ' IDQQ=%1011: Init for printing word as binary
-init_word_bin
-                        call    #init_word
-                        jmp     #init_hex
-
-
-                        ' IIQQ=%1100: Init for printing long as decimal value                        
-init_long_dec
-                        call    #init_long
-                        jmp     #init_dec
-
-
-                        ' IDQQ=%1101: Init for printing long as signed decimal
-init_long_sgd
-                        call    #init_long
-                        jmp     #init_sgd
-
-
-                        ' IDQQ=%1110: Init for printing long as hex                        
-init_long_hex
-                        call    #init_long
-                        jmp     #init_hex                        
-
-
-                        ' IDQQ=%1111: Init for printing long as binary
-init_long_bin
-                        call    #init_long
-                        jmp     #init_hex
-
-
-                        ' IDQQ=%00xx: Init for processing characters
-init_char
-                        mov     bytesperitem, #1        ' Each iteration goes to next byte
-                        mov     ins_load, ins_rdbyte    ' Load data as byte
-init_char_ret           ret                                       
-
+                        '======================================================================
+                        ' Output mode initializers for input modes unequal to 00
+                        '
+                        ' These must be run after the input mode initializers because they
+                        ' depend on variables being initialized there.
                         
-                        ' IDQQ=%01xx: Init for processing bytes
-init_byte
-                        mov     bytesperitem, #1        ' Each iteration goes to next byte
-                        mov     ins_load, ins_rdbyte    ' Load data as byte
-init_byte_ret           ret                                       
-
-                        
-                        ' IDQQ=%10xx: Init for processing words
-init_word
-                        mov     bytesperitem, #2        ' Each iteration goes to next word
-                        mov     ins_load, ins_rdword    ' Load data as word
-init_word_ret           ret
-
-
-                        ' IDQQ=%11xx: Init for processing longs
-init_long
-                        mov     bytesperitem, #4        ' Each iteration goes to next word
-                        mov     ins_load, ins_rdlong    ' Load data as long
-init_long_ret           ret
-
-
-                        ' IDQQ=%xx00 (where xx <> 0): Init for generating decimal
+                        '----------------------------------------------------------------------                                                                                           
+                        ' QQ=%00 for II <> 00: Init for generating decimal
 init_dec                                                                                                                         
                         mov     ins_process, ins_call_dec ' Generate decimal number
                         mov     digits, #0              ' Process output as 0-terminated string
                         jmp     #itemloop
                         
 
-                        ' IDQQ=%xx01 (where xx <> 0): Init for generating signed decimal
+                        '----------------------------------------------------------------------                                                                                           
+                        ' QQ=%01 for II <> 0: Init for generating signed decimal
 init_sgd                                                                                                                         
                         mov     ins_process, ins_call_sgd ' Generate decimal number
                         mov     digits, #0              ' Process output as 0-terminated string
                         jmp     #itemloop
 
 
-                        ' IDQQ=%xx10 (where xx <> 0): Init for generating hexadecimal
+                        '----------------------------------------------------------------------                                                                                           
+                        ' QQ=%10 for II <> 0: Init for generating hexadecimal
 init_hex                                                                                                                         
                         mov     ins_process, ins_call_hex ' Generate hexadecimal
                         mov     digits, bytesperitem
@@ -554,7 +539,8 @@ init_hex
                         jmp     #itemloop
 
 
-                        ' IDQQ=%xx11 (where xx <> 0): Init for generating binary
+                        '----------------------------------------------------------------------                                                                                           
+                        ' QQ=%11 for II <> 0: Init for generating binary
 init_bin
                         mov     ins_process, ins_call_bin ' Generate binary
                         mov     digits, bytesperitem
@@ -562,7 +548,28 @@ init_bin
                         jmp     #itemloop
 
 
-                        ' Process a character
+                        '======================================================================
+                        ' Processing subroutine for filtered characters (II=00 QQ=01)
+                        '
+                        ' If the input character is non-printable, it's replaced by a period
+                        ' character '.'. This is useful e.g. in hexdumps
+                                                
+proc_filter
+                        cmp     x, #$20 wc              ' If value is below space
+              if_nc     cmp     v_127, x wc             ' ... or value is equal/above 127
+              if_c      mov     x, #46                  ' ... Change value to period '.'
+                        ' Fall through to string processor
+
+              
+                        '======================================================================
+                        ' Processing subroutine for characters (II=00 QQ=00)
+                        '
+                        ' This sends the character in x directly to the serial output
+                        ' Other processing functions also call this to print the character
+                        ' in x.
+                        '
+                        ' x is destroyed.
+               
 proc_char
                         ' TODO: Wait until CTS is set here, if enabled
                         
@@ -590,36 +597,56 @@ proc_char_ret
                         ret
 
 
-                        ' Process a character and filter it
-proc_filter
-                        cmp     x, #$20 wc              ' If value is below space
-              if_nc     cmp     v_127, x wc             ' ... or value is equal/above 127
-              if_c      mov     x, #46                  ' ... Change value to period '.'
-                        jmp     #proc_char              ' Process further as a regular char
-
-
-                        ' Process a decimal number
+                        '======================================================================
+                        ' Process a decimal number (II=nonzero QQ=00)
+                        '
+                        ' This converts the number in x to BCD using the "double dabble"
+                        ' algorithm, then it prints each of the significant digits to ASCII
+                        ' and prints them.
+                        '
+                        ' The "double dabble" algorithm is roughly as follows:
+                        ' 1. Initialize the BCD digits buffer to zeroes.
+                        ' 2. If there are any binary bits left, rotate the msb of the binary
+                        '    bits into the lsb of the BCD digits. Otherwise, end the process.
+                        ' 3. Check each BCD digit from right to left: if the digit is 5 or
+                        '    higher, add 3 to the hex digit (carrying over into the rest of
+                        '    the digits. Repeat until all digits are checked
+                        ' 4. Repeat from step 2 until all binary bits have been shifted.
+                                                 
 proc_dec
                         ' Not implemented yet
 
 proc_dec_ret            ret
 
 
-                        ' Process a signed decimal number
+                        '======================================================================
+                        ' Process a signed decimal number (II=nonzero QQ=01)
+                        '
+                        ' If the value in x is negative, send a '-' and negate the value.
+                        ' Then print the resulting unsigned value.
+
 proc_sgd
                         ' Not implemented yet
 
 proc_sgd_ret            ret
 
 
-                        ' Process a hexadecimal number
+                        '======================================================================
+                        ' Process a hexadecimal number (II=nonzero QQ=10)
+                        '
+                        ' Iterate the value in x, converting each group of 4 bits into a
+                        ' hexadecimal digit, and print each digit, msd first.
 proc_hex
                         ' Not implemented yet
 
 proc_hex_ret            ret
 
 
-                        ' Process a binary number
+                        '======================================================================
+                        ' Process a binary number (II=nonzero QQ=11)
+                        '
+                        ' Iterate the value in x, converting each bit into a binary digit, and
+                        ' print each digit, msd first.
 proc_bin
                         ' Not implemented yet
 
@@ -629,6 +656,12 @@ proc_bin_ret            ret
 ' Constants
 zero                    long    0
 v_127                   long    127
+mask_address            long    (|< (1 + sh_AH - sh_A0)) - 1
+mask_count              long    (|< (1 + sh_LH - sh_L0)) - 1
+mask_bittime            long    (|< (1 + sh_TH - sh_T0)) - 1
+mask_pinnum             long    (|< (1 + sh_PH - sh_P0)) - 1
+mask_inmode             long    (|< (1 + sh_IH - sh_I0)) - 1
+mask_outmode            long    (|< (1 + sh_QH - sh_Q0)) - 1
 ins_rdbyte              rdbyte  x, address wz
 ins_rdword              rdword  x, address wz
 ins_rdlong              rdlong  x, address wz
@@ -641,11 +674,32 @@ ins_call_filter         call    #proc_filter
 ins_call_dec            call    #proc_dec
 ins_call_sgd            call    #proc_sgd
 ins_call_hex            call    #proc_hex
-ins_call_bin            call    #proc_bin                  
+ins_call_bin            call    #proc_bin
+
+' Jump table for input modes ("II" values)
+jmptab_inmode           long    init_char               ' II=%00: char or reset
+                        long    init_byte               ' II=%01: byte
+                        long    init_word               ' II=%10: word
+                        long    init_long               ' II=%11: long
+
+' Jump table for output modes (where "II" is zero)
+jmptab_outmode_zero     long    init_char_string        ' QQ=%00: character or string
+                        long    init_char_filter        ' QQ=%01: filtered character or string
+                        long    init_reset              ' QQ=%10: reset pin/baud rate
+                        long    init_res_cts            ' QQ=%11: reset pin/baud rate, w/CTS
+                         
+' Jump table for output modes (where "II" is nonzero)                        
+jmptab_outmode_nonzero  long    init_dec                ' QQ=%00: decimal
+                        long    init_sgd                ' QQ=%01: signed decimal
+                        long    init_hex                ' QQ=%10: hexadecimal
+                        long    init_bin                ' QQ=%11: binary                                 
 
 ' Uninitialized variables
-x                       res     1                       ' Multi-use variable                       
+x                       res     1                       ' Multi-use variable
 pcmd                    res     1                       ' Address of cmd passed through PAR
+command                 res     1                       ' Current command
+inmode                  res     1                       ' Input mode
+outmode                 res     1                       ' Output mode                                
 address                 res     1                       ' Address from the command
 bytesperitem            res     1                       ' How much to add to source address
 digits                  res     1                       ' Number of hex/bin digits to generate
