@@ -350,8 +350,6 @@ ins_zeroitem  if_z      jmp     #endcmd
                         ' This is replaced depending on the output format
 ins_process             jmpret  (0), #(0)
 
-                        ' TODO: add code here to print separator for dec/sgd/hex/bin
-
                         ' Bump source address
                         add     address, bytesperitem
                         
@@ -368,6 +366,9 @@ ins_nextitem            djnz    count, #itemloop
 endcmd
                         wrlong  zero, pcmd              ' Clear command code                        
 
+                        ' Reset first-item flag
+                        mov     firstitem, #1
+                        
 
                         '======================================================================
                         ' Get and process incoming command
@@ -411,7 +412,7 @@ readcmd
                         add     x, #jmptab_inmode
                         jmp     x
 
-                        ' All input mode initializers jump to this location
+                        ' All input mode initializers jump to this location.
                         ' Execute output mode initializer based on jump table
                         ' The table that is used depends on whether the input mode is
                         ' %00 or not.
@@ -442,6 +443,7 @@ init_char
                         ' II=%01: Init for processing bytes
 init_byte
                         mov     bytesperitem, #1        ' Each iteration goes to next byte
+                        mov     unusedbits, #24         ' Each item starts with 24 unused bits
                         mov     ins_load, ins_rdbyte    ' Load data as byte
                         jmp     #end_inmode_init
 
@@ -449,6 +451,7 @@ init_byte
                         ' II=%10: Init for processing words
 init_word
                         mov     bytesperitem, #2        ' Each iteration goes to next word
+                        mov     unusedbits, #16         ' Each item starts with 16 unused bits
                         mov     ins_load, ins_rdword    ' Load data as word
                         jmp     #end_inmode_init
 
@@ -456,6 +459,7 @@ init_word
                         ' II=%11: Init for processing longs
 init_long
                         mov     bytesperitem, #4        ' Each iteration goes to next word
+                        mov     unusedbits, #0          ' Each item starts with 0 unused bits
                         mov     ins_load, ins_rdlong    ' Load data as long
                         jmp     #end_inmode_init
 
@@ -518,7 +522,6 @@ init_res_cts
                         ' QQ=%00 for II <> 00: Init for generating decimal
 init_dec                                                                                                                         
                         mov     ins_process, ins_call_dec ' Generate decimal number
-                        mov     digits, #0              ' Process output as 0-terminated string
                         jmp     #itemloop
                         
 
@@ -526,7 +529,6 @@ init_dec
                         ' QQ=%01 for II <> 0: Init for generating signed decimal
 init_sgd                                                                                                                         
                         mov     ins_process, ins_call_sgd ' Generate decimal number
-                        mov     digits, #0              ' Process output as 0-terminated string
                         jmp     #itemloop
 
 
@@ -557,7 +559,7 @@ init_bin
 proc_filter
                         cmp     x, #$20 wc              ' If value is below space
               if_nc     cmp     v_127, x wc             ' ... or value is equal/above 127
-              if_c      mov     x, #46                  ' ... Change value to period '.'
+              if_c      mov     x, #"."                 ' ... Change value to period '.'
                         ' Fall through to string processor
 
               
@@ -614,8 +616,13 @@ proc_char_ret
                         ' 4. Repeat from step 2 until all binary bits have been shifted.
                                                  
 proc_dec
-                        ' Not implemented yet
+                        call    #separator
 
+                        ' This is the entry point from the signed decimal code
+proc_dec_no_separator                        
+                        ' TODO: Not implemented yet
+
+proc_sgd_ret
 proc_dec_ret            ret
 
 
@@ -626,9 +633,16 @@ proc_dec_ret            ret
                         ' Then print the resulting unsigned value.
 
 proc_sgd
-                        ' Not implemented yet
+                        call    #separator
 
-proc_sgd_ret            ret
+                        test    item, v_8000_0000h wz   ' Z=1 if positive
+              if_nz     mov     x, #"-"                 ' If negative, print "-"
+              if_nz     call    #proc_char
+              if_nz     neg     item, item              ' Negate item
+
+                        ' Continue as if item is unsigned
+                        jmp     proc_dec_no_separator
+                        
 
 
                         '======================================================================
@@ -637,8 +651,30 @@ proc_sgd_ret            ret
                         ' Iterate the value in x, converting each group of 4 bits into a
                         ' hexadecimal digit, and print each digit, msd first.
 proc_hex
-                        ' Not implemented yet
+                        call    #separator
 
+                        ' We will print hex digits from the msb down, but all significant
+                        ' digits are at the lsb of the item. So shift the bits up as necessary.
+                        shl     item, unusedbits
+
+                        ' Init digit counter
+                        mov     digitcount, #digits
+
+hexdigitloop                        
+                        ' Get a hex digit
+                        mov     x, item
+                        shr     x, #24
+                        cmpsub  x, #10 wc               ' C=0 for "0-9", 1 for "A-F"
+              if_nc     add     x, #"0"
+              if_c      add     x, #"A"
+
+                        ' Print the digit
+                        call    #proc_char
+
+                        ' Repeat for all digits
+                        shl     item, #4
+                        djnz    digitcount, #hexdigitloop    
+                         
 proc_hex_ret            ret
 
 
@@ -648,14 +684,51 @@ proc_hex_ret            ret
                         ' Iterate the value in x, converting each bit into a binary digit, and
                         ' print each digit, msd first.
 proc_bin
-                        ' Not implemented yet
+                        call    #separator
 
+                        ' We will print binary digits from the msb down, but all significant
+                        ' digits are at the lsb of the item. So shift the bits up as necessary.
+                        shl     item, unusedbits
+
+                        ' Init digit counter
+                        mov     digitcount, #digits
+
+bindigitloop                        
+                        ' Get a bit
+                        test    item, v_8000_0000h wc   ' C=1 if bit is 1
+              if_nc     mov     x, #"0"
+              if_c      mov     x, #"1"
+
+                        ' Print the digit
+                        call    #proc_char
+
+                        ' Repeat for all digits
+                        shl     item, #1
+                        djnz    digitcount, #bindigitloop    
+                         
 proc_bin_ret            ret                                                                                                                        
-                        
-                                                
+
+
+                        '======================================================================
+                        ' Init numeric item from x and print separator if necessary
+separator
+                        ' Copy value before it's destroyed
+                        mov     item, x
+
+                        ' Check if this is the first item being printed
+                        ' If not, print a space
+                        ' The cmpsub instruction resets the flag
+                        cmpsub  firstitem, #1   ' Z=1 if first item
+              if_nz     mov     x, #" "
+              if_nz     call    #proc_char                                        
+
+separator_ret           ret
+
+                                                                        
 ' Constants
 zero                    long    0
 v_127                   long    127
+v_8000_0000h            long    $8000_0000            
 mask_address            long    (|< (1 + sh_AH - sh_A0)) - 1
 mask_count              long    (|< (1 + sh_LH - sh_L0)) - 1
 mask_bittime            long    (|< (1 + sh_TH - sh_T0)) - 1
@@ -696,14 +769,18 @@ jmptab_outmode_nonzero  long    init_dec                ' QQ=%00: decimal
 
 ' Uninitialized variables
 x                       res     1                       ' Multi-use variable
+item                    res     1                       ' Used for non-character items
 pcmd                    res     1                       ' Address of cmd passed through PAR
 command                 res     1                       ' Current command
 inmode                  res     1                       ' Input mode
 outmode                 res     1                       ' Output mode                                
 address                 res     1                       ' Address from the command
 bytesperitem            res     1                       ' How much to add to source address
+unusedbits              res     1                       ' Number of bits to discard
 digits                  res     1                       ' Number of hex/bin digits to generate
+digitcount              res     1                       ' Digit counter while printing item
 count                   res     1                       ' Number of items left to process
+firstitem               res     1                       ' Used as flag to print separators
 bitmask                 res     1                       ' Bitmask for output
 bittime                 res     1                       ' Time between bits, in clock cycles
 shiftcount              res     1                       ' Shift counter in bit loop
