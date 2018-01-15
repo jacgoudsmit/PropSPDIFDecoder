@@ -443,6 +443,7 @@ init_char
                         ' II=%01: Init for processing bytes
 init_byte
                         mov     bytesperitem, #1        ' Each iteration goes to next byte
+                        mov     numdecdigits, #3        ' "255" is worst case dec value
                         mov     unusedbits, #24         ' Each item starts with 24 unused bits
                         mov     ins_load, ins_rdbyte    ' Load data as byte
                         jmp     #end_inmode_init
@@ -451,6 +452,7 @@ init_byte
                         ' II=%10: Init for processing words
 init_word
                         mov     bytesperitem, #2        ' Each iteration goes to next word
+                        mov     numdecdigits, #5        ' "65535" is worst case dec value
                         mov     unusedbits, #16         ' Each item starts with 16 unused bits
                         mov     ins_load, ins_rdword    ' Load data as word
                         jmp     #end_inmode_init
@@ -459,6 +461,7 @@ init_word
                         ' II=%11: Init for processing longs
 init_long
                         mov     bytesperitem, #4        ' Each iteration goes to next word
+                        mov     numdecdigits, #10       ' "4294967295" is worst case dec value
                         mov     unusedbits, #0          ' Each item starts with 0 unused bits
                         mov     ins_load, ins_rdlong    ' Load data as long
                         jmp     #end_inmode_init
@@ -522,6 +525,8 @@ init_res_cts
                         ' QQ=%00 for II <> 00: Init for generating decimal
 init_dec                                                                                                                         
                         mov     ins_process, ins_call_dec ' Generate decimal number
+                        mov     digits, bytesperitem
+                        shl     digits, #3              ' 8 digits per byte       
                         jmp     #itemloop
                         
 
@@ -608,20 +613,100 @@ proc_char_ret
                         '
                         ' The "double dabble" algorithm is roughly as follows:
                         ' 1. Initialize the BCD digits buffer to zeroes.
-                        ' 2. If there are any binary bits left, rotate the msb of the binary
-                        '    bits into the lsb of the BCD digits. Otherwise, end the process.
-                        ' 3. Check each BCD digit from right to left: if the digit is 5 or
-                        '    higher, add 3 to the hex digit (carrying over into the rest of
-                        '    the digits. Repeat until all digits are checked
-                        ' 4. Repeat from step 2 until all binary bits have been shifted.
+                        ' 2. Repeat the following steps (bytesperitem * 8) times:
+                        '    2.1 Rotate the msb of the binary bits into the lsb of the BCD
+                        '        digits.
+                        '    2.2 Check each BCD digit from left (msd) to right (lsd), If the
+                        '        digit is 5 or higher, add 3 to the digit (without carry)
+                        ' 4. Go to step 2
                                                  
 proc_dec
                         call    #separator
 
                         ' This is the entry point from the signed decimal code
 proc_dec_no_separator                        
-                        ' TODO: Not implemented yet
+                        ' We will print digits from the msb down, but all significant
+                        ' bits are at the lsb of the item. So shift the bits up as necessary.
+                        shl     item, unusedbits
 
+                        ' Clear the decimal digit buffer
+                        mov     decdigitcount, #numdecdigits
+                        movd    ins_cleardec, #decdigits
+
+ins_cleardec            mov     decdigits, #0                        
+                        add     ins_cleardec, d1
+                        djnz    decdigitcount, #ins_cleardec                        
+
+                        ' Init digit counter from number of significant bits
+                        ' Note, in this case the counter counts input bits, not output digits
+                        mov     digitcount, digits     
+dec_shiftloop
+                        test    item, v_8000_0000h wc   ' C=1 if bit=1
+
+                        ' Rotate bit into the decimal digits
+
+                        ' Init pointers
+                        movd    ins_dec_rcl, #decdigits
+                        movd    ins_dec_cmpsub, #decdigits
+
+                        mov     decdigitcount, #numdecdigits
+dec_rotateloop                                                
+ins_dec_rcl             rcl     decdigits, #1           ' Rotate C into digit
+ins_dec_cmpsub          cmpsub  decdigits, #$10 wc      ' C = old bit 3, bit 3 is now reset
+                        add     ins_dec_rcl, d1         ' Bump pointer for rcl instruction
+                        add     ins_dec_cmpsub, d1      ' Bump pointer for cmpsub instruction
+
+                        djnz    decdigitcount, #dec_rotateloop
+
+                        ' Add 3 to all digits that are 5 or higher
+
+                        ' Init pointers                         
+                        movd    ins_dec_cmp, #decdigits
+                        movd    ins_dec_add, #decdigits
+
+dec_add3loop
+ins_dec_cmp             cmp     decdigits, #5 wc
+ins_dec_add   if_nc     add     decdigits, #3
+                        add     ins_dec_cmp, d1
+                        add     ins_dec_add, d1
+
+                        djnz    decdigitcount, #dec_add3loop                             
+
+                        ' Next bit
+                        shl     item, #1
+                        djnz    digitcount, #dec_shiftloop
+
+                        ' At this point, the decimal digits contain a BCD representation of the
+                        ' original item value, padded with zeroes
+                        ' Find the first significant digit first, then print the digits
+
+                        ' Init pointers
+                        mov     x, numdecdigits
+                        add     x, #(decdigits - 1)
+                        movd    ins_dec_test, x
+                        movd    ins_dec_mov, x
+
+                        ' Init count
+                        sub     numdecdigits, #1        ' Always print at least 1 digit
+
+                        ' Trim digits
+dec_trimloop
+ins_dec_test            test    decdigits, #$F wz       ' Z=1 if digit is zero
+              if_z      sub     ins_dec_test, d1        ' Trim one digit
+              if_z      djnz    numdecdigits, #dec_trimloop
+
+                        ' Print rest of the digits
+
+                        add     numdecdigits, #1        ' Always print at least 1 digit
+dec_printloop
+ins_dec_mov             mov     x, decdigits            ' Get digit
+                        add     x, #"0"                 ' Make ASCII
+                        call    #proc_char              ' Print it
+                        
+                        sub     ins_dec_mov, d1         ' Next digit
+                        djnz    numdecdigits, #dec_printloop                        
+
+                        ' All done
 proc_sgd_ret
 proc_dec_ret            ret
 
@@ -654,11 +739,11 @@ proc_hex
                         call    #separator
 
                         ' We will print hex digits from the msb down, but all significant
-                        ' digits are at the lsb of the item. So shift the bits up as necessary.
+                        ' bits are at the lsb of the item. So shift the bits up as necessary.
                         shl     item, unusedbits
 
                         ' Init digit counter
-                        mov     digitcount, #digits
+                        mov     digitcount, digits
 
 hexdigitloop                        
                         ' Get a hex digit
@@ -687,11 +772,11 @@ proc_bin
                         call    #separator
 
                         ' We will print binary digits from the msb down, but all significant
-                        ' digits are at the lsb of the item. So shift the bits up as necessary.
+                        ' bits are at the lsb of the item. So shift the bits up as necessary.
                         shl     item, unusedbits
 
                         ' Init digit counter
-                        mov     digitcount, #digits
+                        mov     digitcount, digits
 
 bindigitloop                        
                         ' Get a bit
@@ -728,7 +813,8 @@ separator_ret           ret
 ' Constants
 zero                    long    0
 v_127                   long    127
-v_8000_0000h            long    $8000_0000            
+v_8000_0000h            long    $8000_0000
+d1                      long    (|< 9)            
 mask_address            long    (|< (1 + sh_AH - sh_A0)) - 1
 mask_count              long    (|< (1 + sh_LH - sh_L0)) - 1
 mask_bittime            long    (|< (1 + sh_TH - sh_T0)) - 1
@@ -779,12 +865,15 @@ bytesperitem            res     1                       ' How much to add to sou
 unusedbits              res     1                       ' Number of bits to discard
 digits                  res     1                       ' Number of hex/bin digits to generate
 digitcount              res     1                       ' Digit counter while printing item
+decdigitcount           res     1                       ' Counter for decimal digits
+numdecdigits            res     1                       ' Maximum number of decimal digits
 count                   res     1                       ' Number of items left to process
 firstitem               res     1                       ' Used as flag to print separators
 bitmask                 res     1                       ' Bitmask for output
 bittime                 res     1                       ' Time between bits, in clock cycles
 shiftcount              res     1                       ' Shift counter in bit loop
 time                    res     1                       ' Time keeper in bit loop
+decdigits               res     10                      ' Buffer for decimal digits
 
                         fit
 
