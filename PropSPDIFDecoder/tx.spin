@@ -100,6 +100,13 @@
 }}
 CON
 
+  ' Testing
+  _clkmode = xtal1 + pll16x
+  _xinfreq = 5_000_000
+
+
+CON
+
   ' Bits in the command word for non-reset commands
   #0
   
@@ -215,6 +222,23 @@ VAR
   long cog            ' Cog ID + 1
   long value          ' Buffer for printing a single decimal or hex value
   long cmd            ' Command
+
+PUB TxTest
+
+  Stop
+
+  waitcnt(cnt + (3 * clkfreq))                          ' Wait a short time
+
+  Start(30, 2_000_000)
+
+  repeat
+    'waitcnt(cnt + (1 * clkfreq))
+  
+    str(STRING("Hello World! "))
+
+
+  repeat while true
+  
   
 PUB Start(par_txpin, par_baudrate)
 '' Starts serial transmitter in a new cog.
@@ -228,7 +252,7 @@ PUB Start(par_txpin, par_baudrate)
   Stop
 
   ' Set the command to reset with the given pin number and baud rate
-  cmd := mask_RESET | (par_txpin << sh_L0) | (clkfreq / par_baudrate)
+  cmd := mask_RESET | (par_txpin << sh_P0) | (clkfreq / par_baudrate){ << sh_T0 }
   
   if (cog := cognew(@fasttx, @cmd) + 1)
     result := @cmd
@@ -324,9 +348,100 @@ DAT
                         ' Initialization
                         
 fasttx
-                        ' Read the address of the command long
-                        rdlong  pcmd, PAR
-                        jmp     #readcmd
+                        'jmp     #readcmd
+
+
+                        ''''''''''''''''''' SANDBOX
+sandbox
+                        mov     command, vcommand
+                        
+                        mov     bittime, command
+                        shr     bittime, #sh_T0
+                        and     bittime, mask_bittime 
+
+                        mov     x, command
+                        shr     x, #sh_P0
+                        and     x, mask_pinnum
+                        mov     bitmask, #1
+                        shl     bitmask, x
+                        mov     OUTA, bitmask
+                        mov     DIRA, bitmask
+
+                        mov     x, #1
+                        shl     x, #26
+                        or      bitmask, x     
+                        
+                        mov     outa, bitmask
+                        mov     dira, bitmask
+                        
+'byte
+{                        
+                        mov     bytesperitem, #1        ' Each iteration goes to next byte
+                        mov     numdecdigits, #3        ' "255" is worst case dec value
+                        mov     unusedbits, #24         ' Each item starts with 24 unused bits
+                        mov     ins_load, ins_rdbyte    ' Load data as byte
+}
+'word
+{
+                        mov     bytesperitem, #2        ' Each iteration goes to next word
+                        mov     numdecdigits, #5        ' "65535" is worst case dec value
+                        mov     unusedbits, #16         ' Each item starts with 16 unused bits
+                        mov     ins_load, ins_rdword    ' Load data as word
+}                        
+'long
+                        
+                        mov     bytesperitem, #4        ' Each iteration goes to next word
+                        mov     numdecdigits, #10       ' "4294967295" is worst case dec value
+                        mov     unusedbits, #0          ' Each item starts with 0 unused bits
+                        mov     ins_load, ins_rdlong    ' Load data as long
+'hex
+{
+                        mov     ins_process, ins_call_hex ' Generate hexadecimal
+                        mov     digits, bytesperitem
+                        shl     digits, #1              ' 2 digits per byte
+}
+'bin                         
+{
+                        mov     ins_process, ins_call_bin ' Generate binary
+                        mov     digits, bytesperitem
+                        shl     digits, #3              ' 8 digits per byte
+}
+'dec
+                        mov     ins_process, ins_call_dec ' Generate decimal number
+                        mov     digits, bytesperitem
+                        shl     digits, #3              ' 8 digits per byte       
+                        
+                        mov     firstitem, #1
+                        
+                        mov     x,testv
+
+                        call    #proc_dec
+
+     
+helloo
+                        mov     x, #" "
+                        call    #proc_char
+hello                        
+                        mov     x, #"H"
+                        call    #proc_char
+                        mov     x, #"e"
+                        call    #proc_char
+                        mov     x, #"l"
+                        call    #proc_char
+                        mov     x, #"l"
+                        call    #proc_char
+                        mov     x, #"o"
+                        call    #proc_char
+                        mov     x, #13
+                        call    #proc_char
+
+                        jmp     #$  'helloo
+
+vcommand                long    mask_RESET | (30 << sh_P0) | (40){ << sh_T0 }
+vxtest                  long    $1234_5678
+testv                   long    999909                                                
+
+                        
 
 
                         '======================================================================
@@ -364,7 +479,7 @@ ins_nextitem            djnz    count, #itemloop
                         ' Execution lands here when a command is done
                         
 endcmd
-                        wrlong  zero, pcmd              ' Clear command code                        
+                        wrlong  zero, PAR               ' Clear command code                        
 
                         ' Reset first-item flag
                         mov     firstitem, #1
@@ -374,7 +489,7 @@ endcmd
                         ' Get and process incoming command
 
 readcmd
-                        rdlong  command, pcmd wz
+                        rdlong  command, PAR wz
               if_z      jmp     #readcmd
 
                         ' Save address
@@ -591,11 +706,11 @@ proc_char
                         ' must be a waitcnt. The wait time of 9 cycles in the instruction above
                         ' accomplishes that the waitcnt immediately exits.
                                                  
-tx_loop                 waitcnt time, time              ' Wait until time for this bit
+tx_loop                 waitcnt time, bittime           ' Wait until time for this bit
                         shr     x, #1  wc               ' Shift the bit to transmit into carry
                         muxc    OUTA, bitmask           ' Set the output
                         djnz    shiftcount, #tx_loop    ' Loop if more bits to transmit
-                        waitcnt time, bittime          'make sure stop bit at least 1 bit time                                                             
+                        waitcnt time, bittime           'make sure stop bit at least 1 bit time                                                             
 
                         ' At this point, the stop bit is still on the line. That's what we want
 
@@ -614,10 +729,10 @@ proc_char_ret
                         ' The "double dabble" algorithm is roughly as follows:
                         ' 1. Initialize the BCD digits buffer to zeroes.
                         ' 2. Repeat the following steps (bytesperitem * 8) times:
-                        '    2.1 Rotate the msb of the binary bits into the lsb of the BCD
-                        '        digits.
-                        '    2.2 Check each BCD digit from left (msd) to right (lsd), If the
+                        '    2.1 Check each BCD digit from left (msd) to right (lsd), If the
                         '        digit is 5 or higher, add 3 to the digit (without carry)
+                        '    2.2 Rotate the msb of the binary bits into the lsb of the BCD
+                        '        digits.
                         ' 4. Go to step 2
                                                  
 proc_dec
@@ -630,39 +745,26 @@ proc_dec_no_separator
                         shl     item, unusedbits
 
                         ' Clear the decimal digit buffer
-                        mov     decdigitcount, #numdecdigits
+                        mov     decdigitcount, numdecdigits
                         movd    ins_cleardec, #decdigits
 
+dec_clearloop
 ins_cleardec            mov     decdigits, #0                        
                         add     ins_cleardec, d1
-                        djnz    decdigitcount, #ins_cleardec                        
+                        djnz    decdigitcount, #dec_clearloop                        
 
                         ' Init digit counter from number of significant bits
                         ' Note, in this case the counter counts input bits, not output digits
-                        mov     digitcount, digits     
+                        mov     digitcount, digits
+
 dec_shiftloop
-                        test    item, v_8000_0000h wc   ' C=1 if bit=1
-
-                        ' Rotate bit into the decimal digits
-
-                        ' Init pointers
-                        movd    ins_dec_rcl, #decdigits
-                        movd    ins_dec_cmpsub, #decdigits
-
-                        mov     decdigitcount, #numdecdigits
-dec_rotateloop                                                
-ins_dec_rcl             rcl     decdigits, #1           ' Rotate C into digit
-ins_dec_cmpsub          cmpsub  decdigits, #$10 wc      ' C = old bit 3, bit 3 is now reset
-                        add     ins_dec_rcl, d1         ' Bump pointer for rcl instruction
-                        add     ins_dec_cmpsub, d1      ' Bump pointer for cmpsub instruction
-
-                        djnz    decdigitcount, #dec_rotateloop
-
                         ' Add 3 to all digits that are 5 or higher
 
                         ' Init pointers                         
                         movd    ins_dec_cmp, #decdigits
                         movd    ins_dec_add, #decdigits
+
+                        mov     decdigitcount, numdecdigits
 
 dec_add3loop
 ins_dec_cmp             cmp     decdigits, #5 wc
@@ -671,6 +773,24 @@ ins_dec_add   if_nc     add     decdigits, #3
                         add     ins_dec_add, d1
 
                         djnz    decdigitcount, #dec_add3loop                             
+
+                        test    item, v_8000_0000h wc   ' C=1 if bit=1
+
+                        ' Rotate bit into the decimal digits
+
+                        ' Init pointers
+                        movd    ins_dec_rcl, #decdigits
+                        movd    ins_dec_cmpsub, #decdigits
+
+                        mov     decdigitcount, numdecdigits
+                        
+dec_rotateloop                                                
+ins_dec_rcl             rcl     decdigits, #1           ' Rotate C into digit
+ins_dec_cmpsub          cmpsub  decdigits, #$10 wc      ' C = old bit 3, bit 3 is now reset
+                        add     ins_dec_rcl, d1         ' Bump pointer for rcl instruction
+                        add     ins_dec_cmpsub, d1      ' Bump pointer for cmpsub instruction
+
+                        djnz    decdigitcount, #dec_rotateloop
 
                         ' Next bit
                         shl     item, #1
@@ -684,26 +804,27 @@ ins_dec_add   if_nc     add     decdigits, #3
                         mov     x, numdecdigits
                         add     x, #(decdigits - 1)
                         movd    ins_dec_test, x
-                        movd    ins_dec_mov, x
+                        movs    ins_dec_mov, x
 
                         ' Init count
-                        sub     numdecdigits, #1        ' Always print at least 1 digit
+                        sub     numdecdigits, #1        ' Don't trim last digit
 
                         ' Trim digits
 dec_trimloop
 ins_dec_test            test    decdigits, #$F wz       ' Z=1 if digit is zero
               if_z      sub     ins_dec_test, d1        ' Trim one digit
+              if_z      sub     ins_dec_mov, #1         ' Skip printing it
               if_z      djnz    numdecdigits, #dec_trimloop
 
-                        ' Print rest of the digits
+                        add     numdecdigits, #1        ' Compensate for previous subtract
 
-                        add     numdecdigits, #1        ' Always print at least 1 digit
+                        ' Print rest of the digits
 dec_printloop
 ins_dec_mov             mov     x, decdigits            ' Get digit
                         add     x, #"0"                 ' Make ASCII
                         call    #proc_char              ' Print it
                         
-                        sub     ins_dec_mov, d1         ' Next digit
+                        sub     ins_dec_mov, #1         ' Next digit
                         djnz    numdecdigits, #dec_printloop                        
 
                         ' All done
@@ -748,7 +869,7 @@ proc_hex
 hexdigitloop                        
                         ' Get a hex digit
                         mov     x, item
-                        shr     x, #24
+                        shr     x, #28                  ' Reduce to last 4 bits
                         cmpsub  x, #10 wc               ' C=0 for "0-9", 1 for "A-F"
               if_nc     add     x, #"0"
               if_c      add     x, #"A"
@@ -803,7 +924,7 @@ separator
                         ' Check if this is the first item being printed
                         ' If not, print a space
                         ' The cmpsub instruction resets the flag
-                        cmpsub  firstitem, #1   ' Z=1 if first item
+                        cmpsub  firstitem, #1 wz        ' Z=1 if first item
               if_nz     mov     x, #" "
               if_nz     call    #proc_char                                        
 
@@ -856,7 +977,6 @@ jmptab_outmode_nonzero  long    init_dec                ' QQ=%00: decimal
 ' Uninitialized variables
 x                       res     1                       ' Multi-use variable
 item                    res     1                       ' Used for non-character items
-pcmd                    res     1                       ' Address of cmd passed through PAR
 command                 res     1                       ' Current command
 inmode                  res     1                       ' Input mode
 outmode                 res     1                       ' Output mode                                
