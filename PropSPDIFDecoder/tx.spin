@@ -73,31 +73,57 @@
 '' to be needed anyway. In a pinch, it can be easily worked around: test if
 '' the byte at $0000 is equal to $00. If not, print the character at $0000
 '' followed by the zero-terminated string at $0001.  
-'' 
-'' Following are the comments from Barry Meaker's original code. Things have
-'' been optimized since he did his measurements, so things work even faster
-'' now. The maximum bit rate is 4Mbps (the bit loop takes 20 clock cycles).
-'' The byte cycle has a much bigger influence on throughput and depends on
-'' the input and output format configuration in the command.
 ''
+'' Some indications about performance (these may change in the future):
+'' - The maximum bitrate (when running the Propeller at 80MHz) is 4 megabits
+''   per second (the bit loop takes 20 clock cycles).
+'' - Setup time per command (once the cog receives the command) is about 35
+''   instructions so about 1.75 microseconds at 80MHz (12.5ns * 4 * 35).
+'' - Time from the end of the item loop until the next command has been read
+''   is near zero (2 instructions + 2 hub instructions; <675ns); the item loop
+''   falls through to the command
+''   reset and command read instructions. 
+'' - Approximate throughput performance:
+''   - Item loop is 1 hub instruction to retrieve the item, followed by 4
+''     instructions to process the item, so 487.5 ns per item at 80MHz.
+''   - For characters:
+''     - 6 instructions (300ns at 80MHz) per character, plus
+''       10 times the configured bit time.
+''     - Max throughput is about 357000 characters per second (TODO this seems high)
+''   - For filtered characters: 9 instructions (450ns) per character, plus
+''     10 times the configured bit time
+''   - For multiple non-character items: add 5 instructions (250ns) plus 1
+''     character time to add the separator character
+''   - For hexadecimal items: 5 instructions (250ns) per item for setup,
+''     plus (8 instructions plus one character time) per printed digit.
+''   - For binary items:
+''     - 5 instructions (250ns) per item for setup, plus
+''       (6 instructions plus one character time) per printed digit.
+''     - Max throughput for binary items is about  
+''   - For decimal items:
+''     - If signed decimal is used, 5 instructions (250ns) per item plus zero
+''       or one times the character time, to print a '-' prefix
+''     - 8 setup and return instructions (400ns) per item
+''     - 3 instructions per decimal digit for clearing the digits
+''     - For each input bit (i.e. 8x for byte, 16x for word, 32x for long):
+''       - 8 instructions (400ns) for setup
+''       - 10 instructions (500ns) per decimal digit for binary->bcd loops
+''     - For each decimal digit
+''       - 8 instructions (400ns) for setup
+''       - 11 instructions (550ns) for trimming and printing
+''       - 1 character time per printed digit
+''     - Worst case for decimal items = 5 + 8 + (3 * digits) + (8 * bits) +
+''       + (10 * bits * digits) + (8 * digits) + (11 * digits).
+''       When printing a negative longword with 10 digits, this ends up being
+''       3865 instructions worst case, i.e. about 193 microseconds plus
+''       character times for the printed characters, at 80MHz.
+''     - Max throughput for integer items is about 50 items per second at the
+''       fastest bitrate, worst case.
 
-{{
-' This routine is optimized to transmit a zero-terminated string
-'
-' FullDuplexSerial.spin uses spin to send each byte to the assembly language
-' routine for transmission. The result is that at 921600 baud each byte only takes
-' 10.85uS, but when sending a string, the overall rate is about 64uS per byte
-' Including the initial spin call to strsize, FullDuplexSerial.spin takes about 5.2mS
-' to transmit a 77 byte string.
-'
-' This routine uses an assembly language routine to scan and transmit the
-' bytes in the zero terminated string. Transmitting the same 77 byte string at
-' 921600 baud takes about 1mS.
-'
-'-----------------REVISION HISTORY-----------------
-' v1.0 - 2011-04-27 Original version by Barry Meaker
-' v2.0 - 2018-01-06 Various enhancements by Jac Goudsmit
-}}
+''-----------------REVISION HISTORY-----------------
+'' v1.0 - 2011-04-27 Original version by Barry Meaker
+'' v2.0 - 2018-01-06 Various enhancements by Jac Goudsmit
+
 CON
 
   ' Testing
@@ -195,26 +221,31 @@ CON
   sh_RESET30                    ' Always 0 for reset                        
   sh_RESET31                    ' Always 0 for reset
                                         
-  ' Input types
-  mask_IN_CHAR = (%00 << sh_I0) ' Read characters (or reset)
-  mask_IN_BYTE = (%01 << sh_I0) ' Read bytes
-  mask_IN_WORD = (%10 << sh_I0) ' Read words
-  mask_IN_LONG = (%11 << sh_I0) ' Read longs
+  ' Input modes (encoded as inmode << sh_I0)
+  #0
+  inmode_CHAR                   ' Character(s) or reset
+  inmode_BYTE                   ' Byte(s)
+  inmode_WORD                   ' Word(s)
+  inmode_LONG                   ' Long(s)
 
-  ' Output types when NOT using mask_IN_CHARS
-  mask_OUT_DEC = (%00 << sh_Q0) ' Unsigned decimal
-  mask_OUT_SGD = (%01 << sh_Q0) ' Signed decimal                        
-  mask_OUT_HEX = (%10 << sh_Q0) ' Hexadecimal, 2/4/8 digits padded with zeroes
-  mask_OUT_BIN = (%11 << sh_Q0) ' Binary, 8/16/32 digits padded with zeroes 
+  ' Output modes (encoded as outmode << sh_Q0)
+  ' Only valid for inmode <> inmode_CHAR
+  #0
+  outmode_DEC                   ' Unsigned Decimal
+  outmode_SGD                   ' Signed Decimal
+  outmode_HEX                   ' Hexadecimal
+  outmode_BIN                   ' Binary
 
-  ' Output types when using mask_IN_CHARS (or without a mask_IN value)
-  mask_STRING  = (%00 << sh_Q0) ' Print string
-  mask_FILTER  = (%01 << sh_Q0) ' Print filtered string
-  mask_RESET   = (%10 << sh_Q0) ' Reset
-  'mask_RES_CTS = (%11 << sh_Q0) ' Reset with CTS handshaking
-  
-  ' Additional values that might come in useful
-  mask_SINGLE  = (1 << sh_L0)   ' Single item (character or longword)                            
+  ' Advanced: String/Reset modes for inmode_CHAR (encoded as srmode << Q0)
+  #0
+  srmode_CHAR                   ' Character(s)
+  srmode_FILT                   ' Filtered character(s) (unprintables replaced by '.')
+  srmode_RESET                  ' Reset baud rate and pin number
+  'Not implemented: srmode_RES_CTS                ' Reset baud rate and pin number, enable CTS handshaking 
+
+  ' Additional values for clarity in Spin code
+  mask_ZEROTERM = (0 << sh_L0)  ' No length parameter=end at 0-item                        
+  mask_SINGLE   = (1 << sh_L0)  ' Single item (character or longword)                            
   
   
 VAR
@@ -223,7 +254,8 @@ VAR
   long value          ' Buffer for printing a single decimal or hex value
   long cmd            ' Command
 
-PUB TxTest
+{{
+PUB TxTest | i
 
   Stop
 
@@ -231,14 +263,21 @@ PUB TxTest
 
   Start(30, 2_000_000)
 
-  repeat
-    'waitcnt(cnt + (1 * clkfreq))
-  
-    str(STRING("Hello World! "))
+  'repeat i from 1 to 10000
+  '  str(STRING("Hello World! "))
 
+  'signeddec($8000_0000 >>24, inmode_BYTE)    
+
+  i := CNT
+  str((inmode_CHAR << sh_I0) | (srmode_FILT << sh_Q0) | ($1 << sh_L0) | (0 << sh_A0))
+  wait
+  i := CNT - i
+
+  Tx(13)
+  dec(i, inmode_LONG)
 
   repeat while true
-  
+}}  
   
 PUB Start(par_txpin, par_baudrate)
 '' Starts serial transmitter in a new cog.
@@ -252,7 +291,7 @@ PUB Start(par_txpin, par_baudrate)
   Stop
 
   ' Set the command to reset with the given pin number and baud rate
-  cmd := mask_RESET | (par_txpin << sh_P0) | (clkfreq / par_baudrate){ << sh_T0 }
+  cmd := (inmode_CHAR << sh_I0) | (srmode_RESET << sh_Q0) | (par_txpin << sh_P0) | (clkfreq / par_baudrate){ << sh_T0 }
   
   if (cog := cognew(@fasttx, @cmd) + 1)
     result := @cmd
@@ -282,7 +321,7 @@ PUB Str(data_ptr)
   repeat until cmd == 0
 
   ' Set command for string
-  cmd := data_ptr
+  cmd := data_ptr {implicit: | constant((inmode_CHAR << sh_I0) | mask_ZEROTERM) }
 
 PUB Tx(par_byte)
 '' Send byte
@@ -293,9 +332,9 @@ PUB Tx(par_byte)
   repeat until cmd == 0
 
   ' Set command to print one byte
-  cmd := @value | mask_SINGLE
+  cmd := @value | constant((inmode_CHAR << sh_I0) | mask_SINGLE)
 
-PUB Dec(par_value)
+PUB Dec(par_value, par_inmode)
 '' Send an unsigned decimal number
 
   value := par_value
@@ -304,9 +343,9 @@ PUB Dec(par_value)
   repeat until cmd == 0
 
   ' Set command to print one decimal value
-  cmd := @value | constant(mask_IN_LONG | mask_OUT_DEC | mask_SINGLE)  
+  cmd := @value | (par_inmode << sh_I0) | constant((outmode_DEC << sh_Q0) | mask_SINGLE)  
   
-PUB SignedDec(par_value)
+PUB SignedDec(par_value, par_inmode)
 '' Send a signed decimal number
 
   value := par_value
@@ -315,9 +354,9 @@ PUB SignedDec(par_value)
   repeat until cmd == 0
 
   ' Set command to print one signed decimal value
-  cmd := @value | constant(mask_IN_LONG | mask_OUT_SGD | mask_SINGLE)
+  cmd := @value | (par_inmode << sh_I0) | constant((outmode_SGD << sh_Q0) | mask_SINGLE)
 
-PUB Hex(par_value)
+PUB Hex(par_value, par_inmode)
 '' Send a hexadecimal number
 
   value := par_value
@@ -326,9 +365,9 @@ PUB Hex(par_value)
   repeat until cmd == 0
 
   ' Set command to print one hex value
-  cmd := @value | constant(mask_IN_LONG | mask_OUT_HEX | mask_SINGLE)
+  cmd := @value | (par_inmode << sh_I0) | constant((outmode_HEX << sh_Q0) | mask_SINGLE)
 
-PUB Bin(par_value)
+PUB Bin(par_value, par_inmode)
 '' Send a binary number
 
   value := par_value
@@ -337,7 +376,7 @@ PUB Bin(par_value)
   repeat until cmd == 0
 
   ' Set command to print one binary value
-  cmd := @value | constant(mask_IN_LONG | mask_OUT_BIN | mask_SINGLE)
+  cmd := @value | (par_inmode << sh_I0) | constant((outmode_HEX << sh_Q0) | mask_SINGLE)
 
 DAT
 
@@ -348,100 +387,7 @@ DAT
                         ' Initialization
                         
 fasttx
-                        'jmp     #readcmd
-
-
-                        ''''''''''''''''''' SANDBOX
-sandbox
-                        mov     command, vcommand
-                        
-                        mov     bittime, command
-                        shr     bittime, #sh_T0
-                        and     bittime, mask_bittime 
-
-                        mov     x, command
-                        shr     x, #sh_P0
-                        and     x, mask_pinnum
-                        mov     bitmask, #1
-                        shl     bitmask, x
-                        mov     OUTA, bitmask
-                        mov     DIRA, bitmask
-
-                        mov     x, #1
-                        shl     x, #26
-                        or      bitmask, x     
-                        
-                        mov     outa, bitmask
-                        mov     dira, bitmask
-                        
-'byte
-{                        
-                        mov     bytesperitem, #1        ' Each iteration goes to next byte
-                        mov     numdecdigits, #3        ' "255" is worst case dec value
-                        mov     unusedbits, #24         ' Each item starts with 24 unused bits
-                        mov     ins_load, ins_rdbyte    ' Load data as byte
-}
-'word
-{
-                        mov     bytesperitem, #2        ' Each iteration goes to next word
-                        mov     numdecdigits, #5        ' "65535" is worst case dec value
-                        mov     unusedbits, #16         ' Each item starts with 16 unused bits
-                        mov     ins_load, ins_rdword    ' Load data as word
-}                        
-'long
-                        
-                        mov     bytesperitem, #4        ' Each iteration goes to next word
-                        mov     numdecdigits, #10       ' "4294967295" is worst case dec value
-                        mov     unusedbits, #0          ' Each item starts with 0 unused bits
-                        mov     ins_load, ins_rdlong    ' Load data as long
-'hex
-{
-                        mov     ins_process, ins_call_hex ' Generate hexadecimal
-                        mov     digits, bytesperitem
-                        shl     digits, #1              ' 2 digits per byte
-}
-'bin                         
-{
-                        mov     ins_process, ins_call_bin ' Generate binary
-                        mov     digits, bytesperitem
-                        shl     digits, #3              ' 8 digits per byte
-}
-'dec
-                        mov     ins_process, ins_call_dec ' Generate decimal number
-                        mov     digits, bytesperitem
-                        shl     digits, #3              ' 8 digits per byte       
-                        
-                        mov     firstitem, #1
-                        
-                        mov     x,testv
-
-                        call    #proc_dec
-
-     
-helloo
-                        mov     x, #" "
-                        call    #proc_char
-hello                        
-                        mov     x, #"H"
-                        call    #proc_char
-                        mov     x, #"e"
-                        call    #proc_char
-                        mov     x, #"l"
-                        call    #proc_char
-                        mov     x, #"l"
-                        call    #proc_char
-                        mov     x, #"o"
-                        call    #proc_char
-                        mov     x, #13
-                        call    #proc_char
-
-                        jmp     #$  'helloo
-
-vcommand                long    mask_RESET | (30 << sh_P0) | (40){ << sh_T0 }
-vxtest                  long    $1234_5678
-testv                   long    999909                                                
-
-                        
+                        jmp     #mainloopstart
 
 
                         '======================================================================
@@ -479,8 +425,10 @@ ins_nextitem            djnz    count, #itemloop
                         ' Execution lands here when a command is done
                         
 endcmd
-                        wrlong  zero, PAR               ' Clear command code                        
+                        wrlong  zero, PAR               ' Clear command code
 
+                        ' This is where execution enters the main loop at initialization time.
+mainloopstart
                         ' Reset first-item flag
                         mov     firstitem, #1
                         
@@ -496,17 +444,17 @@ readcmd
                         mov     address, command
                         'shr     address, #sh_A0
                         and     address, mask_address
-                        
+
                         mov     count, command
                         shr     count, #sh_L0
-                        and     count, mask_count wz                        
+                        and     count, mask_count wz    ' Z=1 to stop at a 0-item                                                
 
                         ' If count is zero, stop at a zero-item, and loop unconditionally
                         ' If count is nonzero, use a DJNZ to count down the items
-              if_z      mov     ins_zeroitem, ins_nop
-              if_z      mov     ins_nextitem, ins_djnzitemloop
-              if_nz     mov     ins_zeroitem, ins_ifjmpend
-              if_nz     mov     ins_nextitem, ins_jmpitemloop                                               
+              if_nz     mov     ins_zeroitem, ins_nop
+              if_nz     mov     ins_nextitem, ins_djnzitemloop
+              if_z      mov     ins_zeroitem, ins_ifjmpend
+              if_z      mov     ins_nextitem, ins_jmpitemloop                                               
 
                         ' Get output mode
                         mov     outmode, command
@@ -519,8 +467,8 @@ readcmd
                         mov     inmode, command
                         shr     inmode, #sh_I0
                         and     inmode, mask_inmode wz  ' Z=1 for character/reset mode
-              if_z      movs    ins_outmode_tab, jmptab_outmode_zero
-              if_nz     movs    ins_outmode_tab, jmptab_outmode_nonzero               
+              if_z      movs    ins_outmode_tab, #jmptab_outmode_zero
+              if_nz     movs    ins_outmode_tab, #jmptab_outmode_nonzero               
 
                         ' Execute input mode initializer based on jump table 
                         mov     x, inmode
@@ -641,7 +589,7 @@ init_res_cts
 init_dec                                                                                                                         
                         mov     ins_process, ins_call_dec ' Generate decimal number
                         mov     digits, bytesperitem
-                        shl     digits, #3              ' 8 digits per byte       
+                        shl     digits, #3              ' Dec loop counts bits: 8 per byte       
                         jmp     #itemloop
                         
 
@@ -649,6 +597,8 @@ init_dec
                         ' QQ=%01 for II <> 0: Init for generating signed decimal
 init_sgd                                                                                                                         
                         mov     ins_process, ins_call_sgd ' Generate decimal number
+                        mov     digits, bytesperitem
+                        shl     digits, #3              ' Dec loop counts bits: 8 per byte       
                         jmp     #itemloop
 
 
@@ -738,11 +688,12 @@ proc_char_ret
 proc_dec
                         call    #separator
 
-                        ' This is the entry point from the signed decimal code
-proc_dec_no_separator                        
                         ' We will print digits from the msb down, but all significant
                         ' bits are at the lsb of the item. So shift the bits up as necessary.
                         shl     item, unusedbits
+
+                        ' This is the entry point from the signed decimal code
+proc_dec_no_separator                        
 
                         ' Clear the decimal digit buffer
                         mov     decdigitcount, numdecdigits
@@ -841,13 +792,19 @@ proc_dec_ret            ret
 proc_sgd
                         call    #separator
 
+                        ' We will print digits from the msb down, but all significant
+                        ' bits are at the lsb of the item. So shift the bits up as necessary.
+                        shl     item, unusedbits
+
+                        ' Check if item is negative, if so print '-' prefix and negate item
+                        
                         test    item, v_8000_0000h wz   ' Z=1 if positive
               if_nz     mov     x, #"-"                 ' If negative, print "-"
               if_nz     call    #proc_char
               if_nz     neg     item, item              ' Negate item
 
                         ' Continue as if item is unsigned
-                        jmp     proc_dec_no_separator
+                        jmp     #proc_dec_no_separator
                         
 
 
@@ -957,22 +914,22 @@ ins_call_hex            call    #proc_hex
 ins_call_bin            call    #proc_bin
 
 ' Jump table for input modes ("II" values)
-jmptab_inmode           long    init_char               ' II=%00: char or reset
-                        long    init_byte               ' II=%01: byte
-                        long    init_word               ' II=%10: word
-                        long    init_long               ' II=%11: long
+jmptab_inmode           jmp     #init_char              ' II=%00: char or reset
+                        jmp     #init_byte              ' II=%01: byte
+                        jmp     #init_word              ' II=%10: word
+                        jmp     #init_long              ' II=%11: long
 
 ' Jump table for output modes (where "II" is zero)
-jmptab_outmode_zero     long    init_char_string        ' QQ=%00: character or string
-                        long    init_char_filter        ' QQ=%01: filtered character or string
-                        long    init_reset              ' QQ=%10: reset pin/baud rate
-                        long    init_res_cts            ' QQ=%11: reset pin/baud rate, w/CTS
+jmptab_outmode_zero     jmp     #init_char_string       ' QQ=%00: character or string
+                        jmp     #init_char_filter       ' QQ=%01: filtered character or string
+                        jmp     #init_reset             ' QQ=%10: reset pin/baud rate
+                        jmp     #init_res_cts           ' QQ=%11: reset pin/baud rate, w/CTS
                          
 ' Jump table for output modes (where "II" is nonzero)                        
-jmptab_outmode_nonzero  long    init_dec                ' QQ=%00: decimal
-                        long    init_sgd                ' QQ=%01: signed decimal
-                        long    init_hex                ' QQ=%10: hexadecimal
-                        long    init_bin                ' QQ=%11: binary                                 
+jmptab_outmode_nonzero  jmp     #init_dec               ' QQ=%00: decimal
+                        jmp     #init_sgd               ' QQ=%01: signed decimal
+                        jmp     #init_hex               ' QQ=%10: hexadecimal
+                        jmp     #init_bin               ' QQ=%11: binary                                 
 
 ' Uninitialized variables
 x                       res     1                       ' Multi-use variable
