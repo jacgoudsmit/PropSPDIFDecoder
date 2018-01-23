@@ -581,7 +581,7 @@ init_inmode_long_ret    jmp     #main_end_inmode_init
 init_spec_string
                         movd    item_ins_load, #chr_char
                         mov     item_ins_process, ins_call_char
-                        movs    item_ins_nextitem, #item_loop_no_separator ' Don't put separators
+                        movs    item_ins_nextitem, #item_loop_no_separator ' Disable separators
                         
 init_spec_string_ret    jmp     #main_end_outmode_init
 
@@ -649,7 +649,7 @@ hexdump_hexloop
                         ' Check if data is relevant
                         ' i.e. start =< current < end
                         cmp     hexdump_endaddr, hexdump_addr wc ' C=0 if current < end                      
-              if_nc     cmp     hexdump_addr, item_address wc ' C=0 if start =< current < end                       
+              if_nc     cmp     hexdump_addr, item_address wc ' C=0 if start =< current =< end                       
 
                         ' Print characters for irrelevant values
               if_c      mov     chr_char, #" "
@@ -685,7 +685,7 @@ hexdump_charloop
                         ' Check if data is relevant                        
                         ' i.e. start =< current < end
                         cmp     hexdump_endaddr, hexdump_addr wc ' C=0 if current < end                      
-              if_nc     cmp     hexdump_addr, item_address wc ' C=0 if start =< current < end                       
+              if_nc     cmp     hexdump_addr, item_address wc ' C=0 if start =< current =< end                       
 
                         ' Print a space for irrelevant bytes
               if_c      mov     chr_char, #" "
@@ -811,7 +811,7 @@ init_outmode_bin_ret    jmp     #main_end_outmode_init
                         ' chr_bitmask           Output pin(s) bitmask (preserved)
                         '
                         ' Const:
-                        ' v127                  Value 127 
+                        ' v126                  Value 126 (highest printable number) 
                         '
                         ' Local:
                         ' chr_count             Number of bits remaining
@@ -819,7 +819,7 @@ init_outmode_bin_ret    jmp     #main_end_outmode_init
                                                 
 chr_filter
                         cmp     chr_char, #$20 wc       ' If value is below space
-              if_nc     cmp     v127, chr_char wc       ' ... or value is equal/above 127
+              if_nc     cmp     v126, chr_char wc       ' ... or value is above 126
               if_c      mov     chr_char, #"."          ' ... Change value to period '.'
               
                         ' Fall through to chr_send routine
@@ -1130,7 +1130,7 @@ bin_send_ret            ret
 ' Constants for various purposes
 zero                    long    0
 d1                      long    (|< 9)            
-v127                    long    127
+v126                    long    126
 vFFF0h                  long    $FFF0
 v8000_0000h             long    $8000_0000
 
