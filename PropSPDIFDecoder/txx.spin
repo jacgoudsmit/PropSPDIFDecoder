@@ -1,59 +1,330 @@
 ''***************************************************************************
-''* Serial data transmitter
+''* TXX.SPIN
+''*
+''* Fast Serial Data Transmitter with Extended functionality
 ''* Copyright (C) 2018 Jac Goudsmit
-''* Based on tx.spin from obex.parallax.com/object/619, (C) 2011 Barry Meaker
+''*
+''* Based on tx.spin, (C) 2011 Barry Meaker
+''* (See https://obex.parallax.com/object/619)
 ''*
 ''* TERMS OF USE: MIT License. See bottom of file.                                                            
 ''***************************************************************************
 ''
-'' This module implements a fast serial transmitter. It cannot receive, and
-'' it doesn't implement flow control (the code has been prepared for CTS
-'' handshaking but this is not implemented; The Propeller Plug can't do it).
+'' This module implements a fast serial transmitter (up to 4 megabits per
+'' second with . It cannot receive, and
+'' it doesn't implement flow control. However, all the formatting routines
+'' (e.g. for printing strings, decimal values, hexadecimal values and binary
+'' values) were written in PASM, so this module makes it easy to generate
+'' formatted output from another PASM cog. Unfortunately this make the module
+'' rather big, however it should be easy to prune away things you don't need,
+'' or extract code fragments that might be useful by themselves in other
+'' projects.  
 ''
-'' A cog is dedicated to transmitting data on a single pin, based on a
-'' command that's passed through a single longword. That way, it can easily
-'' be used from Spin as well as PASM. Note: The command is backwards
-'' compatible with Barry Meaker's version of the code: if you simply put a
-'' longword with a hub address between $0001 and $FFFF in the command, the
-'' cog will print a nul-terminated buffer as before.  
+'' A cog is dedicated to transmitting data on a single pin, based on commands
+'' that are passed through a single longword. That way, the module can
+'' easily be used from Spin as well as PASM. Please note: the code does not
+'' protect against conflicts between multiple other cogs sending commands.
+'' This race condition is easyis easy to mitigate by adding code that uses a
+'' lock. 
 ''
+'' The supported commands consist of an input mode, an output mode and some
+'' parameters to the mode.
+''
+'' Input modes:
+'' - in_BYTE: The cog reads values from the hub, one byte at a time.
+'' - in_WORD: The cog reads values from the hub, one word at a time.
+'' - in_LONG: The cog reads values from the hub, one long at a time.   
+'' - in_SPEC: Special input mode: print strings / buffers or perform a reset. 
+''
+'' Output modes for BYTE, WORD and LONG input modes:
+'' - out_DEC: The values are printed as unsigned decimal numbers.
+'' - out_SGD: The values are printed as signed decimal numbers. 
+'' - out_HEX: The values are printed as hexadecimal numbers.
+'' - out_BIN: The values are printed as binary numbers.
+''
+'' Output modes for SPEC input mode:
+'' - out_CHAR: Bytes from the hub are sent to the serial port directly.
+'' - out_FILT: Same as CHAR but unprintable characters are replaced by "."
+'' - out_DUMP: Generate a printable hex dump of hub memory.
+'' - out_RSET: Reset the baud rate and pin number.     
+''
+'' Length parameter for DEC, SGD, HEX, BIN, CHAR, FILT and DUMP modes:
+'' - 0=Read and send items to the output until an item with value 0 is
+''   encountered. The item with value 0 is not printed.
+'' - nonzero=Read and print the given number of items, regardless of
+''   the values of the items.
+''
+'' Address parameter for DEC, SGD, HEX, BIN, CHAR, FILT and DUMP modes:
+'' - Hub address of the (first) item to print.
+''
+'' Pin parameter for RSET mode:
+'' - Output pin to use for serial data
+''
+'' Bittime parameter for RSET mode:
+'' - Number of clock cycles per bit, i.e. (clkfreq / baudrate)  
+''
+'' This module only contains the "bare necessities" for Spin functions to use
+'' the PASM code:
+'' - Start and stop the cog
+'' - Wait for the cog to finish sending data
+'' - Wait for previous command to finish, and send the next command
+'' The demo module contains further Spin functions that you might want to use
+'' to make it easier to control the cog. 
+''   
+'' See the DAT section further down for more information.
+''
+''-----------------REVISION HISTORY-----------------
+'' v1.0 - 2011-04-27 Original "tx.spin" by Barry Meaker
+'' v2.0 - 2018-01-06 Various enhancements by Jac Goudsmit
+
+CON
+
+  ' These values are only used when running this module by itself (demo mode).
+  _clkmode = xtal1 + pll16x
+  _xinfreq = 5_000_000
+
+
+CON
+
+  ' Bits in the command word for non-reset commands
+  #0
+  
+  sh_ADDR0                      '\
+  sh_ADDR1                      '|
+  sh_ADDR2                      '|
+  sh_ADDR3                      '|
+                                '|
+  sh_ADDR4                      '|
+  sh_ADDR5                      '|
+  sh_ADDR6                      '|
+  sh_ADDR7                      '|
+                                '| Hub address for (first) item
+  sh_ADDR8                      '|
+  sh_ADDR9                      '|
+  sh_ADDR10                     '|
+  sh_ADDR11                     '|
+                                '|
+  sh_ADDR12                     '|
+  sh_ADDR13                     '|
+  sh_ADDR14                     '|
+  sh_ADDRH                      '/
+
+  sh_LEN0                       '\
+  sh_LEN1                       '|
+  sh_LEN2                       '|
+  sh_LEN3                       '|
+                                '|
+  sh_LEN4                       '|
+  sh_LEN5                       '| Number of items to process
+  sh_LEN6                       '| (0=stop when there is an item with value 0
+  sh_LEN7                       '|
+                                '|
+  sh_LEN8                       '|
+  sh_LEN9                       '|
+  sh_LEN10                      '|
+  sh_LENH                       '/
+
+  sh_OUT0                       '\
+  sh_OUTH                       '/ Output format
+
+  sh_IN0                        '\
+  sh_INH                        '/ Input format
+
+
+  ' Bits in the command word for the reset command
+  #0
+  
+  sh_BITTIME0                   '\
+  sh_BITTIME1                   '|
+  sh_BITTIME2                   '|
+  sh_BITTIME3                   '|
+                                '|
+  sh_BITTIME4                   '|
+  sh_BITTIME5                   '|
+  sh_BITTIME6                   '|
+  sh_BITTIME7                   '|
+                                '|
+  sh_BITTIME8                   '|
+  sh_BITTIME9                   '| Bit time in clock cycles
+  sh_BITTIME10                  '|
+  sh_BITTIME11                  '|
+                                '|
+  sh_BITTIME12                  '|
+  sh_BITTIME13                  '|
+  sh_BITTIME14                  '|
+  sh_BITTIME15                  '|
+                                '|
+  sh_BITTIME16                  '|
+  sh_BITTIME17                  '|
+  sh_BITTIME18                  '|
+  sh_BITTIMEH                   '/
+  
+  sh_RESERVED20                 '\
+  sh_RESERVED21                 '| Reserved
+  sh_RESERVED22                 '/
+
+  sh_PIN0                       '\
+  sh_PIN1                       '|
+  sh_PIN2                       '| Pin number for TXD
+  sh_PIN3                       '|
+  sh_PINH                       '/
+
+  sh_RESET28                    ' Always 1 for reset
+  sh_RESET29                    ' Always 1 for reset                        
+  sh_RESET30                    ' Always 0 for reset                        
+  sh_RESET31                    ' Always 0 for reset
+                                        
+  ' Input modes (encoded as inmode << sh_IN0)
+  #0
+  in_SPEC                       ' Special: direct characters or reset
+  in_BYTE                       ' Byte(s)
+  in_WORD                       ' Word(s)
+  in_LONG                       ' Long(s)
+
+  ' Output modes (encoded as outmode << sh_OUT0)
+  ' Only valid for inmodes BYTE, WORD or LONG
+  #0
+  out_DEC                       ' Unsigned Decimal
+  out_SGD                       ' Signed Decimal
+  out_HEX                       ' Hexadecimal
+  out_BIN                       ' Binary
+
+  ' Output modes (encoded as outmode << sh_OUT0)
+  ' Only valid for in_SPEC
+  #0
+  out_CHAR                      ' Character(s)
+  out_FILT                      ' Filtered char(s) (unprintables sent as '.')
+  out_DUMP                      ' Generate hexdump of memory area                        
+  out_RSET                      ' Reset baud rate and pin number
+
+  ' Additional values for clarity in Spin code
+  mask_ZEROTERM = (0 << sh_LEN0)  ' No length parameter=end at 0-item                        
+  mask_SINGLE   = (1 << sh_LEN0)  ' Single item (character or longword)                            
+
+  ' Bitmasks for easy command composing
+  ' All masks marked *1 should be combined with an address, and a
+  ' length shifted left by sh_LEN0.
+  ' All masks marked *2 should be combined with a bit time in clock
+  ' cycles, and a pin number shifted left by sh_PIN0
+  ' If you don't use a mask and simply pass an address to the Str
+  ' function, the value will be interpreted as a nul-terminated string.
+  mask_BYTE_DEC = (in_BYTE << sh_IN0) | (out_DEC  << sh_OUT0) '\
+  mask_BYTE_SGD = (in_BYTE << sh_IN0) | (out_SGD  << sh_OUT0) '|
+  mask_BYTE_HEX = (in_BYTE << sh_IN0) | (out_HEX  << sh_OUT0) '|
+  mask_BYTE_BIN = (in_BYTE << sh_IN0) | (out_BIN  << sh_OUT0) '|   
+  mask_WORD_DEC = (in_WORD << sh_IN0) | (out_DEC  << sh_OUT0) '|
+  mask_WORD_SGD = (in_WORD << sh_IN0) | (out_SGD  << sh_OUT0) '|
+  mask_WORD_HEX = (in_WORD << sh_IN0) | (out_HEX  << sh_OUT0) '|
+  mask_WORD_BIN = (in_WORD << sh_IN0) | (out_BIN  << sh_OUT0) '| *1
+  mask_LONG_DEC = (in_LONG << sh_IN0) | (out_DEC  << sh_OUT0) '|
+  mask_LONG_SGD = (in_LONG << sh_IN0) | (out_SGD  << sh_OUT0) '|
+  mask_LONG_HEX = (in_LONG << sh_IN0) | (out_HEX  << sh_OUT0) '|
+  mask_LONG_BIN = (in_LONG << sh_IN0) | (out_BIN  << sh_OUT0) '|
+  mask_CHAR     = (in_SPEC << sh_IN0) | (out_CHAR << sh_OUT0) '|
+  mask_FILT     = (in_SPEC << sh_IN0) | (out_FILT << sh_OUT0) '|
+  mask_DUMP     = (in_SPEC << sh_IN0) | (out_DUMP << sh_OUT0) '/
+  mask_RSET     = (in_SPEC << sh_IN0) | (out_RSET << sh_OUT0) '  *2  
+  
+  
+VAR
+
+  long  cog           ' Cog ID + 1
+
+  ' Following are used by the PASM code
+  long  cmd           ' Command
+  long  benchmark     ' Number of cycles used by previous command
+
+PUB Start(par_txpin, par_baudrate)
+'' Starts serial transmitter in a new cog.
+''
+'' par_txpin      (long): Pin number (0..31)
+'' par_baudrate   (long): Number of bits per second (clkfreq/20 .. clkfreq/$F_FFFF)
+''
+'' Returns (ptr to long): Address of command, or 0 on failure                  
+
+  ' Stop the cog if it's running
+  Stop
+
+  ' Set the command to reset with the given pin number and baud rate
+  cmd := mask_RSET | (par_txpin << sh_PIN0) | ((clkfreq / par_baudrate) << sh_BITTIME0)
+  
+  if (cog := cognew(@main, @cmd) + 1)
+    result := @cmd
+
+PUB Stop
+'' Stop the txx cog, if any.
+
+  if cog
+    cogstop(cog - 1)
+
+PUB Wait
+'' Wait until previous command is done.
+''
+'' Returns (long) number of clock cycles that were needed to execute the
+'' last command.
+''
+'' This can be used to ensure that buffers that are used in commands are not
+'' overwritten while the cog is processing them.
+''
+'' The result value is the number of cycles that the command took to finish.
+
+  repeat until cmd == 0
+
+  result := benchmark  
+
+PUB Str(par_cmd)
+'' Send string or command
+''
+'' par_cmd (long)               : Command
+'' 
+'' The parameter can either be a 16-bit address of a nul-terminated string, or
+'' a command composed in spin, as described in the documentation at the top of
+'' this source file.                      
+
+  ' Wait until any previous command has finished
+  repeat until cmd == 0
+
+  ' Set command for string
+  cmd := par_cmd {implicit: constant((in_CHAR << sh_I0) | (out_CHAR << sh_Q0) | (0 << sh_LEN0)) | parm_cmd }
+
+DAT
 '' Each command to the PASM code is a single longword that has the following
 '' format:
 ''
 '' %II_QQ_LLLL_LLLL_LLLL_AAAA_AAAA_AAAA_AAAA
-''  --                                       Input format (see below)
-''     --                                    Output format (see below)
+''  --                                       Input mode (see below)
+''     --                                    Output mode (see below)
 ''        -------------                      Length (0=stop at value 0)
 ''                      -------------------  Hub addr for data (0=nop)
 ''
 '' When resetting, the command is formatted as follows:
-'' %001C_PPPPP_RRR_TTTT_TTTT_TTTT_TTTT_TTTT
-''     -                                     Enable CTS on pin+1
+'' %0011_PPPPP_RRR_TTTT_TTTT_TTTT_TTTT_TTTT
+''  ----                                     Always %0011 for reset
 ''       -----                               Pin number for TXD
 ''             ---                           Reserved
 ''                 ------------------------  Bit time in cycles
 ''
-'' The II format bits determine how the cog reads data from the hub.
+'' The input mode bits determine how the cog reads data from the hub.
 '' It can read values in bytes, words or longs, or it can read bytes as
 '' characters that are sent directly to the serial output.
 ''
-'' II=%00 read chars (length is in bytes)
+'' II=%00 read chars (length is in bytes) or perform special function
 ''    %01 read bytes (length is in bytes)
 ''    %10 read words (length is in words)
 ''    %11 read longs (length is in longs)
 ''
-'' The QQ format bits determine how the cog formats the output. The meaning
-'' of the bits depends on whether the II bits are set to 00 (character input)
-'' or other modes. For non-character output, when printing multiple values,
+'' The output mode bits determine how the cog formats the output. The meaning
+'' of the bits depends on whether the input mode is set to %00 or to another
+'' value. For non-character output, when printing multiple values,
 '' values are separated by spaces.
 ''
-'' For II=0:
+'' For inmode==0:
 '' QQ=%00 send characters directly to output
 ''    %01 send printable characters directly to output, replace others by '.'
-''    %10 reset cog
-''    %11 (reserved for CTS handshaking)
+''    %10 send hexdump of memory area
+''    %11 reset cog
 ''          
-'' For II=not 0:
+'' For inmode<>0:
 '' QQ=%00 send unsigned decimal 
 ''    %01 send signed decimal ('-' prefix for negative, no prefix otherwise)
 ''    %10 send hexadecimal padded with 0
@@ -67,327 +338,64 @@
 '' - To print a hexdump of a $3EF byte buffer at ABCD: $63EFABCD
 '' - To print the unsigned decimal value of the longword at ABCD: $C001ABCD
 ''
-'' Value 0 for the command longword is used as a special value to represent
-'' "nothing to do". That value would normally correspond to a command to
-'' "Print nul-terminated string stored at address $0000" which is not likely
-'' to be needed anyway. In a pinch, it can be easily worked around: test if
-'' the byte at $0000 is equal to $00. If not, print the character at $0000
-'' followed by the zero-terminated string at $0001.  
+'' All combinations of bits are valid in the command longword, but value
+'' $0000_0000 is reserved to indicate that the cog has finished a command
+'' and/or has nothing to do. That value corresponds to a command that would 
+'' print a nul-terminated string starting at address $0000, and it's unlikely
+'' that any application would be in a situation where it would need to do
+'' that. If you application does need to do it, it can work around it as
+'' follows:
+'' 1. Test if the byte at location $0000 is zero. If it is, you're done.
+'' 2. Otherwise: use command $0001_0000 to print the single character at
+''    location $0000, then wait until the cog resets the command to 0.
+'' 3. Then used the command $0000_0001 to print the zero-terminated string at
+''    location $0001.
 ''
-'' Some indications about performance (these may change in the future):
+'' Some indications about performance (these are subject to change!):
 '' - The maximum bitrate (when running the Propeller at 80MHz) is 4 megabits
-''   per second (the bit loop takes 20 clock cycles).
+''   per second (the bit loop takes at least 20 clock cycles).
 '' - Setup time per command (once the cog receives the command) is about 35
 ''   instructions so about 1.75 microseconds at 80MHz (12.5ns * 4 * 35).
 '' - Time from the end of the item loop until the next command has been read
 ''   is near zero (2 instructions + 2 hub instructions; <675ns); the item loop
-''   falls through to the command
-''   reset and command read instructions. 
-'' - Approximate throughput performance:
-''   - Item loop is 1 hub instruction to retrieve the item, followed by 4
-''     instructions to process the item, so 487.5 ns per item at 80MHz.
-''   - For characters:
-''     - 6 instructions (300ns at 80MHz) per character, plus
-''       10 times the configured bit time.
-''     - Max throughput is about 357000 characters per second (TODO this seems high)
-''   - For filtered characters: 9 instructions (450ns) per character, plus
-''     10 times the configured bit time
-''   - For multiple non-character items: add 5 instructions (250ns) plus 1
+''   falls through to the command reset and command read instructions. This
+''   time should be irrelevant for most applications. 
+'' - While looping through items, each item takes 1 hub instruction to
+''   retrieve the item, followed by 4 instructions to process the item, so
+''   487.5 ns per item at 80MHz. In addition, there's a processing time for
+''   each item which depends mostly on the output mode and somewhat on the
+''   input mode. Furthermore, it takes time to output each character, which
+''   depends on the configured time per bit.
+''   For example, here is the processing time per item, not including the
+''   actual character time:
+''   - For characters, processing time is 6 instructions (300ns at 80MHz).
+''   - For filtered characters: 9 instructions (450ns) per character.
+''   - For multiple non-character items: 5 instructions (250ns) plus 1
 ''     character time to add the separator character
 ''   - For hexadecimal items: 5 instructions (250ns) per item for setup,
-''     plus (8 instructions plus one character time) per printed digit.
-''   - For binary items:
-''     - 5 instructions (250ns) per item for setup, plus
-''       (6 instructions plus one character time) per printed digit.
-''     - Max throughput for binary items is about  
-''   - For decimal items:
-''     - If signed decimal is used, 5 instructions (250ns) per item plus zero
-''       or one times the character time, to print a '-' prefix
-''     - 8 setup and return instructions (400ns) per item
-''     - 3 instructions per decimal digit for clearing the digits
-''     - For each input bit (i.e. 8x for byte, 16x for word, 32x for long):
-''       - 8 instructions (400ns) for setup
-''       - 10 instructions (500ns) per decimal digit for binary->bcd loops
-''     - For each decimal digit
-''       - 8 instructions (400ns) for setup
-''       - 11 instructions (550ns) for trimming and printing
-''       - 1 character time per printed digit
-''     - Worst case for decimal items = 5 + 8 + (3 * digits) + (8 * bits) +
-''       + (10 * bits * digits) + (8 * digits) + (11 * digits).
-''       When printing a negative longword with 10 digits, this ends up being
-''       3865 instructions worst case, i.e. about 193 microseconds plus
-''       character times for the printed characters, at 80MHz.
-''     - Max throughput for integer items is about 50 items per second at the
-''       fastest bitrate, worst case.
+''     plus 8 instructions per printed digit.
+''   - For binary items: 5 instructions (250ns) per item for setup, plus
+''     6 instructions per printed digit.
+''   - For decimal items, the time to process an item is difficult to estimate
+''     but in a worst-case situation, it takes about 3865 instructions to
+''     generate the output digits. That's about 193 microseconds at 80MHz.
+'' - The Demo module generates some benchmarks using the built-in benchmarking
+''   facility.
 
-''-----------------REVISION HISTORY-----------------
-'' v1.0 - 2011-04-27 Original version by Barry Meaker
-'' v2.0 - 2018-01-06 Various enhancements by Jac Goudsmit
-
-CON
-
-  ' Testing
-  _clkmode = xtal1 + pll16x
-  _xinfreq = 5_000_000
-
-
-CON
-
-  ' Bits in the command word for non-reset commands
-  #0
-  
-  sh_A0                         '\
-  sh_A1                         '|
-  sh_A2                         '|
-  sh_A3                         '|
-                                '|
-  sh_A4                         '|
-  sh_A5                         '|
-  sh_A6                         '|
-  sh_A7                         '|
-                                '| Hub address for (first) item
-  sh_A8                         '|
-  sh_A9                         '|
-  sh_A10                        '|
-  sh_A11                        '|
-                                '|
-  sh_A12                        '|
-  sh_A13                        '|
-  sh_A14                        '|
-  sh_AH                        '/
-
-  sh_L0                         '\
-  sh_L1                         '|
-  sh_L2                         '|
-  sh_L3                         '|
-                                '|
-  sh_L4                         '|
-  sh_L5                         '| Number of items to process
-  sh_L6                         '| (0=stop when there is an item with value 0
-  sh_L7                         '|
-                                '|
-  sh_L8                         '|
-  sh_L9                         '|
-  sh_L10                        '|
-  sh_LH                         '/
-
-  sh_Q0                         '\
-  sh_QH                         '/ Output format
-
-  sh_I0                         '\
-  sh_IH                         '/ Input format
-
-
-  ' Bits in the command word for the reset command
-  #0
-  
-  sh_T0                         '\
-  sh_T1                         '|
-  sh_T2                         '|
-  sh_T3                         '|
-                                '|
-  sh_T4                         '|
-  sh_T5                         '|
-  sh_T6                         '|
-  sh_T7                         '|
-                                '|
-  sh_T8                         '|
-  sh_T9                         '| Bit time in clock cycles
-  sh_T10                        '|
-  sh_T11                        '|
-                                '|
-  sh_T12                        '|
-  sh_T13                        '|
-  sh_T14                        '|
-  sh_T15                        '|
-                                '|
-  sh_T16                        '|
-  sh_T17                        '|
-  sh_T18                        '|
-  sh_TH                        '/
-  
-  sh_RESET20                    '\
-  sh_RESET21                    '| Reserved
-  sh_RESET22                    '/
-
-  sh_P0                         '\
-  sh_P1                         '|
-  sh_P2                         '| Pin number for TXD
-  sh_P3                         '|
-  sh_PH                         '/
-
-  sh_C                          ' Enable CTS on pin+1
-  sh_RESET29                    ' Always 1 for reset                        
-  sh_RESET30                    ' Always 0 for reset                        
-  sh_RESET31                    ' Always 0 for reset
-                                        
-  ' Input modes (encoded as inmode << sh_I0)
-  #0
-  inmode_CHAR                   ' Character(s) or reset
-  inmode_BYTE                   ' Byte(s)
-  inmode_WORD                   ' Word(s)
-  inmode_LONG                   ' Long(s)
-
-  ' Output modes (encoded as outmode << sh_Q0)
-  ' Only valid for inmode <> inmode_CHAR
-  #0
-  outmode_DEC                   ' Unsigned Decimal
-  outmode_SGD                   ' Signed Decimal
-  outmode_HEX                   ' Hexadecimal
-  outmode_BIN                   ' Binary
-
-  ' Advanced: String/Reset modes for inmode_CHAR (encoded as srmode << Q0)
-  #0
-  srmode_CHAR                   ' Character(s)
-  srmode_FILT                   ' Filtered character(s) (unprintables replaced by '.')
-  srmode_RESET                  ' Reset baud rate and pin number
-  'Not implemented: srmode_RES_CTS                ' Reset baud rate and pin number, enable CTS handshaking 
-
-  ' Additional values for clarity in Spin code
-  mask_ZEROTERM = (0 << sh_L0)  ' No length parameter=end at 0-item                        
-  mask_SINGLE   = (1 << sh_L0)  ' Single item (character or longword)                            
-  
-  
-VAR
-
-  long cog            ' Cog ID + 1
-  long value          ' Buffer for printing a single decimal or hex value
-  long cmd            ' Command
-
-{{
-PUB TxTest | i
-
-  Stop
-
-  waitcnt(cnt + (3 * clkfreq))                          ' Wait a short time
-
-  Start(30, 2_000_000)
-
-  'repeat i from 1 to 10000
-  '  str(STRING("Hello World! "))
-
-  'signeddec($8000_0000 >>24, inmode_BYTE)    
-
-  i := CNT
-  str((inmode_CHAR << sh_I0) | (srmode_FILT << sh_Q0) | ($1 << sh_L0) | (0 << sh_A0))
-  wait
-  i := CNT - i
-
-  Tx(13)
-  dec(i, inmode_LONG)
-
-  repeat while true
-}}  
-  
-PUB Start(par_txpin, par_baudrate)
-'' Starts serial transmitter in a new cog.
-''
-'' par_txpin      (long): Pin number (0..31)
-'' par_baudrate   (long): Number of bits per second (clkfreq/20 .. clkfreq/$F_FFFF)
-''
-'' Returns (ptr to long): Address of command, or 0 on failure                  
-
-  ' Stop the cog if it's running
-  Stop
-
-  ' Set the command to reset with the given pin number and baud rate
-  cmd := (inmode_CHAR << sh_I0) | (srmode_RESET << sh_Q0) | (par_txpin << sh_P0) | (clkfreq / par_baudrate){ << sh_T0 }
-  
-  if (cog := cognew(@fasttx, @cmd) + 1)
-    result := @cmd
-
-PUB Stop
-'' Stop the tx cog, if any.
-
-  if cog
-    cogstop(cog - 1)
-
-PUB Wait
-'' Wait until previous command is done.
-''
-'' This can be used to ensure that buffers that are used in commands are not
-'' overwritten while the cog is processing them. 
-
-  repeat until cmd == 0  
-
-PUB Str(data_ptr)
-'' Send string
-''
-'' The parameter can either be a 16-bit address of a nul-terminated string, or
-'' a command composed in spin, as described in the documentation at the top of
-'' this source file.                      
-
-  ' Wait until any previous command has finished
-  repeat until cmd == 0
-
-  ' Set command for string
-  cmd := data_ptr {implicit: | constant((inmode_CHAR << sh_I0) | mask_ZEROTERM) }
-
-PUB Tx(par_byte)
-'' Send byte
-
-  value := par_byte
-  
-  ' Wait until any previous command has finished
-  repeat until cmd == 0
-
-  ' Set command to print one byte
-  cmd := @value | constant((inmode_CHAR << sh_I0) | mask_SINGLE)
-
-PUB Dec(par_value, par_inmode)
-'' Send an unsigned decimal number
-
-  value := par_value
-
-  ' Wait until any previous command has finished
-  repeat until cmd == 0
-
-  ' Set command to print one decimal value
-  cmd := @value | (par_inmode << sh_I0) | constant((outmode_DEC << sh_Q0) | mask_SINGLE)  
-  
-PUB SignedDec(par_value, par_inmode)
-'' Send a signed decimal number
-
-  value := par_value
-
-  ' Wait until any previous command has finished
-  repeat until cmd == 0
-
-  ' Set command to print one signed decimal value
-  cmd := @value | (par_inmode << sh_I0) | constant((outmode_SGD << sh_Q0) | mask_SINGLE)
-
-PUB Hex(par_value, par_inmode)
-'' Send a hexadecimal number
-
-  value := par_value
-
-  ' Wait until any previous command has finished
-  repeat until cmd == 0
-
-  ' Set command to print one hex value
-  cmd := @value | (par_inmode << sh_I0) | constant((outmode_HEX << sh_Q0) | mask_SINGLE)
-
-PUB Bin(par_value, par_inmode)
-'' Send a binary number
-
-  value := par_value
-
-  ' Wait until any previous command has finished
-  repeat until cmd == 0
-
-  ' Set command to print one binary value
-  cmd := @value | (par_inmode << sh_I0) | constant((outmode_HEX << sh_Q0) | mask_SINGLE)
 
 DAT
-
                         org  0
 
 
                         '======================================================================
                         ' Initialization
                         
-fasttx
-                        jmp     #mainloopstart
+main
+                        ' Init benchmark pointer
+                        mov     main_pbenchmark, PAR
+                        add     main_pbenchmark, #4
+                        
+                        jmp     #main_loop_start
 
 
                         '======================================================================
@@ -397,26 +405,38 @@ fasttx
                         ' command is done
                         ' The instructions are modified depending on input mode, output mode,
                         ' length parameter and runtime state.
-                         
-itemloop
+
+item_loop_separator
+                        ' When printing values (not characters), print a separator between
+                        ' items.
+                        mov     chr_char, #" "
+                        call    #chr_send
+
+main_end_outmode_init
+                        ' Execution lands here after the output mode initializer is done
+item_loop_no_separator
+                        ' Execution lands here when printing strings or buffers (not values)
+
                         ' Load an item
                         ' This is changed to the appropriate RD... instruction
-ins_load                rdbyte  x, address wz
+item_ins_load           rdbyte  (x), (item_address) wz
 
                         ' Take action if the item was zero
                         ' If count was initialized to nonzero, this is changed to a NOP  
-ins_zeroitem  if_z      jmp     #endcmd
+item_ins_bail if_z      jmp     #(main_endcmd)
 
                         ' Process the item
                         ' This is replaced depending on the output format
-ins_process             jmpret  (0), #(0)
+item_ins_process        jmpret  (0), #(0)
 
                         ' Bump source address
-                        add     address, bytesperitem
+                        add     item_address, item_numbytes
                         
                         ' Next item
                         ' If the length parameter was zero, the djnz is replaced by a jmp
-ins_nextitem            djnz    count, #itemloop
+item_ins_nextitem       djnz    (item_count), #(item_loop_separator)
+
+                        ' Fall through to end the command
 
 
                         '======================================================================
@@ -424,64 +444,82 @@ ins_nextitem            djnz    count, #itemloop
                         '
                         ' Execution lands here when a command is done
                         
-endcmd
+main_endcmd
                         wrlong  zero, PAR               ' Clear command code
 
+                        ' Update benchmark output in the hub
+                        mov     x, CNT
+                        sub     x, main_starttimestamp
+                        wrlong  x, main_pbenchmark
+
                         ' This is where execution enters the main loop at initialization time.
-mainloopstart
-                        ' Reset first-item flag
-                        mov     firstitem, #1
-                        
+                        ' The Spin code initializes the command to RSET before starting the
+                        ' cog, so that's the first thing that gets done.
+main_loop_start
 
                         '======================================================================
                         ' Get and process incoming command
 
-readcmd
-                        rdlong  command, PAR wz
-              if_z      jmp     #readcmd
+main_readcmd
+                        ' Read command, repeat until it's nonzero
+                        rdlong  main_command, PAR wz
+              if_z      jmp     #main_readcmd
 
-                        ' Save address
-                        mov     address, command
-                        'shr     address, #sh_A0
-                        and     address, mask_address
+                        ' Save start timestamp for benchmarking
+                        mov     main_starttimestamp, CNT
+                                                
+                        ' Save address (invalid for out_RSET)
+                        mov     item_address, main_command
+                        'shr     item_address, #sh_ADDR0
+                        and     item_address, mask_address
 
-                        mov     count, command
-                        shr     count, #sh_L0
-                        and     count, mask_count wz    ' Z=1 to stop at a 0-item                                                
+                        ' Save length (invalid for out_RSET)
+                        mov     item_count, main_command
+                        shr     item_count, #sh_LEN0
+                        and     item_count, mask_count wz ' Z=1 to stop at a 0-item                                                
 
                         ' If count is zero, stop at a zero-item, and loop unconditionally
                         ' If count is nonzero, use a DJNZ to count down the items
-              if_nz     mov     ins_zeroitem, ins_nop
-              if_nz     mov     ins_nextitem, ins_djnzitemloop
-              if_z      mov     ins_zeroitem, ins_ifjmpend
-              if_z      mov     ins_nextitem, ins_jmpitemloop                                               
+              if_nz     mov     item_ins_bail, ins_nop
+              if_nz     mov     item_ins_nextitem, ins_djnzitemloop
+              if_z      mov     item_ins_bail, ins_ifjmpend
+              if_z      mov     item_ins_nextitem, ins_jmpitemloop                                               
 
-                        ' Get output mode
-                        mov     outmode, command
-                        shr     outmode, #sh_Q0
-                        and     outmode, mask_outmode                        
+                        ' Save output mode
+                        mov     main_outmode, main_command
+                        shr     main_outmode, #sh_OUT0
+                        and     main_outmode, mask_outmode                        
                         
-                        ' Get input mode
+                        ' Save input mode
+                        mov     main_inmode, main_command
+                        shr     main_inmode, #sh_IN0
+                        and     main_inmode, mask_inmode wz ' Z=1 for character/reset mode
+
                         ' Select the output mode initializer jump table based on whether the
-                        ' input mode is %00 or not.
-                        mov     inmode, command
-                        shr     inmode, #sh_I0
-                        and     inmode, mask_inmode wz  ' Z=1 for character/reset mode
-              if_z      movs    ins_outmode_tab, #jmptab_outmode_zero
-              if_nz     movs    ins_outmode_tab, #jmptab_outmode_nonzero               
+                        ' input mode is %00 (in_SPEC) or not.
+              if_z      movs    main_ins_outmode_tab, #jmptab_outmode_spec ' Use special table
+              if_nz     movs    main_ins_outmode_tab, #jmptab_outmode_b_w_l ' Byte/Word/Long
 
                         ' Execute input mode initializer based on jump table 
-                        mov     x, inmode
+                        mov     x, main_inmode
                         add     x, #jmptab_inmode
                         jmp     x
 
                         ' All input mode initializers jump to this location.
+                        ' The input mode initializers are written as subroutines but
+                        ' because they are called from the jump tables, they can't be called
+                        ' with a CALL (or JMPRET) instruction, because the address of the
+                        ' return instruction isn't known when we jump into the table.
+                        ' So this address is hard-coded in the input mode initializers'
+                        ' return JMP instruction and the jump table uses JMP (not JMPRET)
+                        ' to go to the selected input mode initializer.
+main_end_inmode_init
+                        
                         ' Execute output mode initializer based on jump table
                         ' The table that is used depends on whether the input mode is
-                        ' %00 or not.
-end_inmode_init
-                        mov     x, outmode
-ins_outmode_tab         add     x, #(0)                 ' Modified depending on inmode 
+                        ' %00 (in_SPEC) or not. It is initialized above.
+                        mov     x, main_outmode
+main_ins_outmode_tab    add     x, #(0)                 ' Modified depending on inmode 
                         jmp     x
 
 
@@ -492,189 +530,391 @@ ins_outmode_tab         add     x, #(0)                 ' Modified depending on 
                         ' each other's data.
 
                         '----------------------------------------------------------------------                        
-                        ' II=%00: Init for processing characters
-                        ' Note, in case of a reset, the character initializer is useless,
-                        ' but it's more efficient to just execute them here, with a penalty
-                        ' of wasted clock cycles when resetting, as compared to doing an
-                        ' extra check to skip this when we're initializing string mode.
-                        '
-                        ' Input mode for characters is identical to input for bytes,
-                        ' so fall through to the initializer for bytes
-init_char
+                        ' in_SPEC: Init for special operations (characters, hexdump, reset)
+                        
+init_inmode_spec
+                        ' When in_SPEC is used to accomplish a reset, skip over the
+                        ' following initialization code. This is technically not necessary
+                        ' (the values aren't used during further processing) but it saves some
+                        ' time. 
+                        cmp     main_outmode, #out_RSET wz ' Z=1 when resetting
+              if_z      jmp     init_inmode_spec_ret    ' NOTE: intentional indirect jump
+
+                        ' Fall through to in_BYTE initializer
 
                         '----------------------------------------------------------------------
-                        ' II=%01: Init for processing bytes
-init_byte
-                        mov     bytesperitem, #1        ' Each iteration goes to next byte
-                        mov     numdecdigits, #3        ' "255" is worst case dec value
-                        mov     unusedbits, #24         ' Each item starts with 24 unused bits
-                        mov     ins_load, ins_rdbyte    ' Load data as byte
-                        jmp     #end_inmode_init
+                        ' in_BYTE: Init for processing bytes
+init_inmode_byte
+                        mov     item_numbytes, #1       ' Each iteration goes to next byte
+                        mov     dec_numdigits, #3       ' "255" is worst case dec value
+                        mov     item_unusedbits, #24    ' Each item starts with 24 unused bits
+                        mov     item_ins_load, ins_rdbyte ' Load data as byte
+init_inmode_spec_ret
+init_inmode_byte_ret    jmp     #main_end_inmode_init
 
                         '----------------------------------------------------------------------                        
-                        ' II=%10: Init for processing words
-init_word
-                        mov     bytesperitem, #2        ' Each iteration goes to next word
-                        mov     numdecdigits, #5        ' "65535" is worst case dec value
-                        mov     unusedbits, #16         ' Each item starts with 16 unused bits
-                        mov     ins_load, ins_rdword    ' Load data as word
-                        jmp     #end_inmode_init
+                        ' in_WORD: Init for processing words
+init_inmode_word
+                        mov     item_numbytes, #2       ' Each iteration goes to next word
+                        mov     dec_numdigits, #5       ' "65535" is worst case dec value
+                        mov     item_unusedbits, #16    ' Each item starts with 16 unused bits
+                        mov     item_ins_load, ins_rdword ' Load data as word
+
+init_inmode_word_ret    jmp     #main_end_inmode_init
 
                         '----------------------------------------------------------------------
-                        ' II=%11: Init for processing longs
-init_long
-                        mov     bytesperitem, #4        ' Each iteration goes to next word
-                        mov     numdecdigits, #10       ' "4294967295" is worst case dec value
-                        mov     unusedbits, #0          ' Each item starts with 0 unused bits
-                        mov     ins_load, ins_rdlong    ' Load data as long
-                        jmp     #end_inmode_init
+                        ' in_LONG: Init for processing longs
+init_inmode_long
+                        mov     item_numbytes, #4       ' Each iteration goes to next long
+                        mov     dec_numdigits, #10      ' "4294967295" is worst case dec value
+                        mov     item_unusedbits, #0     ' Each item starts with 0 unused bits
+                        mov     item_ins_load, ins_rdlong ' Load data as long
+
+init_inmode_long_ret    jmp     #main_end_inmode_init
 
 
                         '======================================================================
-                        ' Output mode initializers for input mode %00
+                        ' Output mode initializers for in_SPEC
 
                         '----------------------------------------------------------------------
-                        ' QQ=%00 for II=00: Init for printing a string         
-init_char_string
-                        mov     ins_process, ins_call_char
-                        jmp     #itemloop
+                        ' in_SPEC and out_CHAR: Init for printing a string         
+init_spec_string
+                        movd    item_ins_load, #chr_char
+                        mov     item_ins_process, ins_call_char
+                        movs    item_ins_nextitem, #item_loop_no_separator ' Don't put separators
+                        
+init_spec_string_ret    jmp     #main_end_outmode_init
 
 
                         '----------------------------------------------------------------------                        
-                        ' QQ=%01 for II=00: Init for printing a filtered string 
-init_char_filter       
-                        mov     ins_process, ins_call_filter ' Filter byte, send to output
-                        jmp     #itemloop                                       
+                        ' in_SPEC and out_FILT: Init for printing a filtered string 
+init_spec_filter
+                        movd    item_ins_load, #chr_char       
+                        mov     item_ins_process, ins_call_filter ' Filter byte, send to output
+                        
+init_spec_filter_ret    jmp     #main_end_outmode_init                                       
 
 
                         '----------------------------------------------------------------------                        
-                        ' QQ=%10 for II=00: Init bit rate and pin number
-init_reset
-                        mov     bittime, command
-                        shr     bittime, #sh_T0
-                        and     bittime, mask_bittime 
+                        ' in_SPEC and out_DUMP: Init for generating a hexdump
+                        '
+                        ' In this mode, execution doesn't return to the main loop.
+init_spec_hexdump
+                        ' Set the start address of the first line to the requested address
+                        ' modulo 16 so that hex dumps always start at a paragraph border
+                        mov     hexdump_lineaddr, item_address
+                        and     hexdump_lineaddr, vFFF0h
 
-                        mov     x, command
-                        shr     x, #sh_P0
+                        ' Calculate the end address so that irrelevant data can be skipped.
+                        mov     hexdump_endaddr, item_address
+                        add     hexdump_endaddr, item_count
+                        sub     hexdump_endaddr, #1
+
+                        ' Start the first line with the requested start address
+                        mov     hex_value, item_address
+                        jmp     #hexdump_lineloop_start
+                         
+hexdump_lineloop                                    
+                        ' At the start of the line, print the address as hex word
+
+                        ' Set hex value to line address
+                        mov     hex_value, hexdump_lineaddr
+
+hexdump_lineloop_start
+                        ' Execution enters here so that the first printed address is the
+                        ' requested start address
+                                                
+                        ' Prepare for printing hex word
+                        call    #init_inmode_word       ' Destroys return instruction
+                        movs    init_inmode_word_ret, #main_end_inmode_init ' Recover
+                        call    #init_outmode_hex       ' Destroys return instruction        
+                        movs    init_outmode_hex_ret, #main_end_outmode_init ' Recover
+                        call    #hex_send
+                        
+                        ' Separator after the address
+                        mov     chr_char, #" "
+                        call    #chr_send
+
+                        ' Prepare for printing hex bytes
+                        call    #init_inmode_byte       ' Destroys return instruction
+                        movs    init_inmode_byte_ret, #main_end_inmode_init ' Recover
+                        call    #init_outmode_hex       ' Destroys return instruction
+                        movs    init_outmode_hex_ret, #main_end_outmode_init ' Recover
+                        
+                        ' Print 16 hex values
+                        mov     hexdump_addr, hexdump_lineaddr
+                        mov     hexdump_count, #16
+
+hexdump_hexloop                         
+                        ' Check if data is relevant
+                        ' i.e. start =< current < end
+                        cmp     hexdump_endaddr, hexdump_addr wc ' C=0 if current < end                      
+              if_nc     cmp     hexdump_addr, item_address wc ' C=0 if start =< current < end                       
+
+                        ' Print characters for irrelevant values
+              if_c      mov     chr_char, #" "
+              if_c      call    #chr_send
+              if_c      mov     chr_char, #" "
+              if_c      call    #chr_send
+              
+                        ' Print hex value of byte
+              if_nc     rdbyte  hex_value, hexdump_addr
+              if_nc     call    #hex_send
+
+                        ' Print separator after hex byte
+                        cmp     hexdump_count, #8 wz    ' Z=1 if halfway across line
+              if_z      mov     chr_char, #"-"
+              if_nz     mov     chr_char, #" "
+                        call    #chr_send
+
+                        ' Bump address
+                        add     hexdump_addr, #1
+
+                        ' Repeat
+                        djnz    hexdump_count, #hexdump_hexloop
+
+                        ' Print separator
+                        mov     chr_char, #" "
+                        call    #chr_send
+                        
+                        ' Print 16 filtered characters
+                        mov     hexdump_addr, hexdump_lineaddr
+                        mov     hexdump_count, #16
+
+hexdump_charloop
+                        ' Check if data is relevant                        
+                        ' i.e. start =< current < end
+                        cmp     hexdump_endaddr, hexdump_addr wc ' C=0 if current < end                      
+              if_nc     cmp     hexdump_addr, item_address wc ' C=0 if start =< current < end                       
+
+                        ' Print a space for irrelevant bytes
+              if_c      mov     chr_char, #" "
+              if_nc     rdbyte  chr_char, hexdump_addr
+                        call    #chr_filter
+
+                        ' Bump address
+                        add     hexdump_addr, #1
+
+                        ' Repeat
+                        djnz    hexdump_count, #hexdump_charloop
+
+                        ' Print end of line
+                        mov     chr_char, #13
+                        call    #chr_send
+
+                        ' If we're still inside the requested address range, print the
+                        ' next line.
+                        cmp     hexdump_endaddr, hexdump_addr wc ' C=0 if current < end
+              if_nc     add     hexdump_lineaddr, #16
+              if_nc     jmp     #hexdump_lineloop
+
+                        ' All done here.
+                        jmp     #main_endcmd                                                                            
+                                                      
+                               
+                        '----------------------------------------------------------------------                        
+                        ' in_SPEC and out_RSET: Init bit rate and pin number
+                        '
+                        ' In this mode, execution doesn't return to the main loop.
+                        '
+                        ' Also, the item address and item count are invalid (and irrelevant)
+                        ' because this uses a different bit mask for the command. 
+init_spec_reset
+                        ' Save requested number of Propeller cycles per bit on the serial port
+                        mov     x, main_command
+                        shr     x, #sh_BITTIME0
+                        and     x, mask_bittime
+                        mov     chr_bittime, x 
+
+                        ' Save the pin number from the command as a bitmask
+                        mov     x, main_command
+                        shr     x, #sh_PIN0
                         and     x, mask_pinnum
-                        mov     bitmask, #1
-                        shl     bitmask, x
-                        mov     OUTA, bitmask
-                        mov     DIRA, bitmask
+                        mov     chr_bitmask, #1
+                        shl     chr_bitmask, x
+
+                        ' Set the output and direction registers. Pin 30 should normally have
+                        ' a pull-up resistor (usually on the Prop plug) so by setting the OUTA
+                        ' register before we set DIRA, we prevent glitches that might confuse
+                        ' the receiver on the other end of the cable, and we can start sending
+                        ' data right away.
+                        mov     OUTA, chr_bitmask
+                        mov     DIRA, chr_bitmask
 
                         ' All done here                        
-                        jmp     #endcmd
-
-
-                        '----------------------------------------------------------------------
-                        ' Q=%11 for II=00: Init bit rate and pin number, enable CTS handshake
-                        '
-                        ' This is not implemented because the Prop plug doesn't have CTS broken
-                        ' out anyway.
-                        ' Basically, to implement this, the bit mask for the CTS pin should be
-                        ' initialized here and the main loop should check wait for that pin to
-                        ' be high before sending a byte in the main loop.
-init_res_cts
-                        jmp     #init_reset             ' Just handle this as a normal reset
+init_spec_reset_ret     jmp     #main_endcmd
 
 
                         '======================================================================
-                        ' Output mode initializers for input modes unequal to 00
+                        ' Output mode initializers for input modes other than in_SPEC
                         '
                         ' These must be run after the input mode initializers because they
                         ' depend on variables being initialized there.
                         
                         '----------------------------------------------------------------------                                                                                           
-                        ' QQ=%00 for II <> 00: Init for generating decimal
-init_dec                                                                                                                         
-                        mov     ins_process, ins_call_dec ' Generate decimal number
-                        mov     digits, bytesperitem
-                        shl     digits, #3              ' Dec loop counts bits: 8 per byte       
-                        jmp     #itemloop
+                        ' out_DEC (and not in_SPEC): Init for generating decimal
+init_outmode_dec
+                        movd    item_ins_load, #dec_value
+                        mov     item_ins_process, ins_call_dec ' Generate decimal number
+                        mov     dec_numbits, item_numbytes
+                        shl     dec_numbits, #3         ' Dec loop counts bits: 8 per byte
+                        mov     dec_unusedbits, item_unusedbits
+                               
+init_outmode_dec_ret    jmp     #main_end_outmode_init
                         
 
                         '----------------------------------------------------------------------                                                                                           
-                        ' QQ=%01 for II <> 0: Init for generating signed decimal
-init_sgd                                                                                                                         
-                        mov     ins_process, ins_call_sgd ' Generate decimal number
-                        mov     digits, bytesperitem
-                        shl     digits, #3              ' Dec loop counts bits: 8 per byte       
-                        jmp     #itemloop
+                        ' out_SGD (and not in_SPEC): Init for generating signed decimal
+init_outmode_sgd
+                        movd    item_ins_load, #dec_value
+                        mov     item_ins_process, ins_call_sgd ' Generate decimal number
+                        mov     dec_numbits, item_numbytes
+                        shl     dec_numbits, #3         ' Dec loop counts bits: 8 per byte       
+                        mov     dec_unusedbits, item_unusedbits
+                               
+init_outmode_sgd_ret    jmp     #main_end_outmode_init
 
 
                         '----------------------------------------------------------------------                                                                                           
-                        ' QQ=%10 for II <> 0: Init for generating hexadecimal
-init_hex                                                                                                                         
-                        mov     ins_process, ins_call_hex ' Generate hexadecimal
-                        mov     digits, bytesperitem
-                        shl     digits, #1              ' 2 digits per byte 
-                        jmp     #itemloop
+                        ' out_HEX (and not in_SPEC): Init for generating hexadecimal
+init_outmode_hex
+                        movd    item_ins_load, #hex_value
+                        mov     item_ins_process, ins_call_hex ' Generate hexadecimal
+                        mov     hex_numdigits, item_numbytes
+                        shl     hex_numdigits, #1       ' 2 digits per byte 
+                        mov     hex_unusedbits, item_unusedbits
+                               
+init_outmode_hex_ret    jmp     #main_end_outmode_init
 
 
                         '----------------------------------------------------------------------                                                                                           
-                        ' QQ=%11 for II <> 0: Init for generating binary
-init_bin
-                        mov     ins_process, ins_call_bin ' Generate binary
-                        mov     digits, bytesperitem
-                        shl     digits, #3              ' 8 digits per byte
-                        jmp     #itemloop
+                        ' out_HEX (and not in_SPEC): Init for generating binary
+init_outmode_bin
+                        movd    item_ins_load, #bin_value
+                        mov     item_ins_process, ins_call_bin ' Generate binary
+                        mov     bin_numdigits, item_numbytes
+                        shl     bin_numdigits, #3       ' 8 digits per byte
+                        mov     bin_unusedbits, item_unusedbits
+                               
+init_outmode_bin_ret    jmp     #main_end_outmode_init
 
 
                         '======================================================================
-                        ' Processing subroutine for filtered characters (II=00 QQ=01)
+                        ' Send a filtered character to the serial port 
                         '
                         ' If the input character is non-printable, it's replaced by a period
                         ' character '.'. This is useful e.g. in hexdumps
+                        '
+                        ' Input:
+                        ' chr_char              Character to print (destroyed)
+                        ' chr_bittime           Number of clock cycles per bit (preserved)
+                        ' chr_bitmask           Output pin(s) bitmask (preserved)
+                        '
+                        ' Const:
+                        ' v127                  Value 127 
+                        '
+                        ' Local:
+                        ' chr_count             Number of bits remaining
+                        ' chr_time              Keeps track of time
                                                 
-proc_filter
-                        cmp     x, #$20 wc              ' If value is below space
-              if_nc     cmp     v_127, x wc             ' ... or value is equal/above 127
-              if_c      mov     x, #"."                 ' ... Change value to period '.'
-                        ' Fall through to string processor
+chr_filter
+                        cmp     chr_char, #$20 wc       ' If value is below space
+              if_nc     cmp     v127, chr_char wc       ' ... or value is equal/above 127
+              if_c      mov     chr_char, #"."          ' ... Change value to period '.'
+              
+                        ' Fall through to chr_send routine
 
               
                         '======================================================================
-                        ' Processing subroutine for characters (II=00 QQ=00)
+                        ' Send a character to the serial port
                         '
-                        ' This sends the character in x directly to the serial output
-                        ' Other processing functions also call this to print the character
-                        ' in x.
+                        ' This sends the character in chr_char directly to the serial pin.
+                        ' Other processing functions also call this to print characters.
                         '
-                        ' x is destroyed.
+                        ' Input:
+                        ' chr_char              Character to print (destroyed)
+                        ' chr_bittime           Number of clock cycles per bit (preserved)
+                        ' chr_bitmask           Output pin(s) bitmask (preserved)
+                        '
+                        ' Const:
+                        '
+                        ' Local:
+                        ' chr_count             Number of bits remaining
+                        ' chr_time              Keeps track of time
                
-proc_char
-                        ' TODO: Wait until CTS is set here, if enabled
-                        
-                        or      x, #$100                ' Add in a stop bit
-                        shl     x, #1                   ' Shift to create a start bit
+chr_send
 
-                        mov     shiftcount, #10         ' 1 start, 8 data, 1 stop
-                        mov     time, CNT               ' Read the current count
-                        add     time, #9                ' Value 9 immediately ends waitcnt
+                        or      chr_char, #$100         ' Add in a stop bit
+                        shl     chr_char, #1            ' Shift to create a start bit
+
+                        mov     chr_count, #10          ' 1 start, 8 data, 1 stop
+                        mov     chr_time, CNT           ' Read the current count
+                        add     chr_time, #9            ' Value 9 immediately ends waitcnt
 
                         ' When execution falls into the bit loop below, the first instruction
                         ' must be a waitcnt. The wait time of 9 cycles in the instruction above
                         ' accomplishes that the waitcnt immediately exits.
                                                  
-tx_loop                 waitcnt time, bittime           ' Wait until time for this bit
-                        shr     x, #1  wc               ' Shift the bit to transmit into carry
-                        muxc    OUTA, bitmask           ' Set the output
-                        djnz    shiftcount, #tx_loop    ' Loop if more bits to transmit
-                        waitcnt time, bittime           'make sure stop bit at least 1 bit time                                                             
+chr_loop                waitcnt chr_time, chr_bittime   ' Wait until time for this bit
+                        shr     chr_char, #1  wc        ' Shift the bit to transmit into carry
+                        muxc    OUTA, chr_bitmask       ' Set the output
+                        djnz    chr_count, #chr_loop    ' Loop if more bits to transmit
+                        waitcnt chr_time, chr_bittime   ' Make sure stopbit at least 1 bit time                                                             
 
                         ' At this point, the stop bit is still on the line. That's what we want
 
-proc_filter_ret
-proc_char_ret
+chr_send_ret
+chr_filter_ret
                         ret
 
 
                         '======================================================================
-                        ' Process a decimal number (II=nonzero QQ=00)
+                        ' Send a signed decimal number to the serial port
                         '
-                        ' This converts the number in x to BCD using the "double dabble"
-                        ' algorithm, then it prints each of the significant digits to ASCII
-                        ' and prints them.
+                        ' If the value in dec_value is negative, send a '-' and negate the
+                        ' value.
+                        '
+                        ' Then print the resulting unsigned value.
+                        '
+                        ' Input:
+                        ' dec_value             Value to print (destroyed)
+                        ' dec_numbits           Number bits in value (preserved)
+                        ' dec_numdigits         Max expected output digits (preserved)
+                        ' dec_unusedbits        Number of unused bits in value (preserved)         
+                        '
+                        ' Const:
+                        ' v8000_0000h           Value $8000_0000
+                        '
+                        ' Local:
+                        ' dec_bitcount          Remaining number of bits to process
+                        ' dec_digitcount        Remaining BCD digits to process
+                        ' dec_digits[10]        Array holding BCD digits            
+                        '
+                        ' Calls:
+                        ' dec_send              Print decimal value
+                        ' chr_send              Print characters        
+                        '
+
+dec_send_signed
+                        ' Shift the value to the left to eliminate unused bits
+                        shl     dec_value, dec_unusedbits
+                                                
+                        ' Check if item is negative, if so print '-' prefix and negate item
+                        
+                        test    dec_value, v8000_0000h wz ' Z=1 if positive
+              if_nz     mov     chr_char, #"-"          ' If negative, print "-"
+              if_nz     call    #chr_send
+              if_nz     neg     dec_value, dec_value    ' Negate value
+
+                        ' Continue with signed decimal
+                        jmp     #dec_send_no_unused
+
+
+                        '======================================================================
+                        ' Send a decimal value to the serial port
+                        '
+                        ' This converts the number in dec_value to BCD using the "double
+                        ' dabble" algorithm, then it prints each of the significant digits.
                         '
                         ' The "double dabble" algorithm is roughly as follows:
                         ' 1. Initialize the BCD digits buffer to zeroes.
@@ -682,277 +922,311 @@ proc_char_ret
                         '    2.1 Check each BCD digit from left (msd) to right (lsd), If the
                         '        digit is 5 or higher, add 3 to the digit (without carry)
                         '    2.2 Rotate the msb of the binary bits into the lsb of the BCD
-                        '        digits.
-                        ' 4. Go to step 2
-                                                 
-proc_dec
-                        call    #separator
+                        '        digits, and rotate each BCD digit to the next one.
+                        '
+                        ' Input:
+                        ' dec_value             Value to print (destroyed)
+                        ' dec_numbits           Number bits in value (preserved)
+                        ' dec_numdigits         Max expected output digits (preserved)         
+                        ' dec_unusedbits        Number of unused bits in value (preserved)         
+                        '
+                        ' Const:
+                        ' v8000_0000h           Value $8000_0000
+                        '
+                        ' Local:
+                        ' dec_bitcount          Remaining number of bits to process
+                        ' dec_digitcount        Remaining BCD digits to process
+                        ' dec_digits[10]        Array holding BCD digits            
+                        '
+                        ' Calls:
+                        ' chr_send              Print characters
+                        
+dec_send
+                        ' Shift the value to the left to eliminate unused bits
+                        shl     dec_value, dec_unusedbits
 
-                        ' We will print digits from the msb down, but all significant
-                        ' bits are at the lsb of the item. So shift the bits up as necessary.
-                        shl     item, unusedbits
+                        ' This is where execution enters when printing a signed decimal
+dec_send_no_unused
 
-                        ' This is the entry point from the signed decimal code
-proc_dec_no_separator                        
-
-                        ' Clear the decimal digit buffer
-                        mov     decdigitcount, numdecdigits
-                        movd    ins_cleardec, #decdigits
+                        ' Clear the BCD digits
+                        movd    dec_ins_cleardec, #dec_digitarray
+                        
+                        mov     dec_digitcount, dec_numdigits
 
 dec_clearloop
-ins_cleardec            mov     decdigits, #0                        
-                        add     ins_cleardec, d1
-                        djnz    decdigitcount, #dec_clearloop                        
+dec_ins_cleardec        mov     dec_digitarray, #0                        
+                        add     dec_ins_cleardec, d1
+                        djnz    dec_digitcount, #dec_clearloop                        
 
-                        ' Init digit counter from number of significant bits
-                        ' Note, in this case the counter counts input bits, not output digits
-                        mov     digitcount, digits
+                        ' Init bit counter from number of significant bits
+                        mov     dec_bitcount, dec_numbits
 
 dec_shiftloop
                         ' Add 3 to all digits that are 5 or higher
 
                         ' Init pointers                         
-                        movd    ins_dec_cmp, #decdigits
-                        movd    ins_dec_add, #decdigits
+                        movd    dec_ins_cmp, #dec_digitarray
+                        movd    dec_ins_add, #dec_digitarray
 
-                        mov     decdigitcount, numdecdigits
+                        mov     dec_digitcount, dec_numdigits
 
 dec_add3loop
-ins_dec_cmp             cmp     decdigits, #5 wc
-ins_dec_add   if_nc     add     decdigits, #3
-                        add     ins_dec_cmp, d1
-                        add     ins_dec_add, d1
+dec_ins_cmp             cmp     dec_digitarray, #5 wc
+dec_ins_add   if_nc     add     dec_digitarray, #3
 
-                        djnz    decdigitcount, #dec_add3loop                             
+                        add     dec_ins_cmp, d1
+                        add     dec_ins_add, d1
 
-                        test    item, v_8000_0000h wc   ' C=1 if bit=1
+                        djnz    dec_digitcount, #dec_add3loop                             
+
+                        test    dec_value, v8000_0000h wc ' C=1 if bit=1
 
                         ' Rotate bit into the decimal digits
 
                         ' Init pointers
-                        movd    ins_dec_rcl, #decdigits
-                        movd    ins_dec_cmpsub, #decdigits
+                        movd    dec_ins_rcl, #dec_digitarray
+                        movd    dec_ins_cmpsub, #dec_digitarray
 
-                        mov     decdigitcount, numdecdigits
+                        mov     dec_digitcount, dec_numdigits
                         
 dec_rotateloop                                                
-ins_dec_rcl             rcl     decdigits, #1           ' Rotate C into digit
-ins_dec_cmpsub          cmpsub  decdigits, #$10 wc      ' C = old bit 3, bit 3 is now reset
-                        add     ins_dec_rcl, d1         ' Bump pointer for rcl instruction
-                        add     ins_dec_cmpsub, d1      ' Bump pointer for cmpsub instruction
+dec_ins_rcl             rcl     dec_digitarray, #1      ' Rotate C into digit
+dec_ins_cmpsub          cmpsub  dec_digitarray, #$10 wc ' C = bit 4 (old bit 3), bit 4 cleared
+                        add     dec_ins_rcl, d1         ' Bump pointer for rcl instruction
+                        add     dec_ins_cmpsub, d1      ' Bump pointer for cmpsub instruction
 
-                        djnz    decdigitcount, #dec_rotateloop
+                        djnz    dec_digitcount, #dec_rotateloop
 
                         ' Next bit
-                        shl     item, #1
-                        djnz    digitcount, #dec_shiftloop
+                        shl     dec_value, #1
+                        djnz    dec_bitcount, #dec_shiftloop
 
                         ' At this point, the decimal digits contain a BCD representation of the
                         ' original item value, padded with zeroes
                         ' Find the first significant digit first, then print the digits
 
                         ' Init pointers
-                        mov     x, numdecdigits
-                        add     x, #(decdigits - 1)
-                        movd    ins_dec_test, x
-                        movs    ins_dec_mov, x
+                        mov     x, #(dec_digitarray - 1)
+                        add     x, dec_numdigits
+                        movd    dec_ins_test, x
+                        movs    dec_ins_mov, x
 
                         ' Init count
-                        sub     numdecdigits, #1        ' Don't trim last digit
+                        mov     dec_digitcount, dec_numdigits
+                        sub     dec_digitcount, #1      ' Keep at least one digit
 
-                        ' Trim digits
+                        ' Find the most significant digit
 dec_trimloop
-ins_dec_test            test    decdigits, #$F wz       ' Z=1 if digit is zero
-              if_z      sub     ins_dec_test, d1        ' Trim one digit
-              if_z      sub     ins_dec_mov, #1         ' Skip printing it
-              if_z      djnz    numdecdigits, #dec_trimloop
+dec_ins_test            test    dec_digitarray, #$F wz  ' Z=1 if digit is zero
+              if_z      sub     dec_ins_test, d1        ' Trim one digit
+              if_z      sub     dec_ins_mov, #1         ' Skip printing it
+              if_z      djnz    dec_digitcount, #dec_trimloop
 
-                        add     numdecdigits, #1        ' Compensate for previous subtract
+                        add     dec_digitcount, #1      ' Get remaining digits to print 
 
                         ' Print rest of the digits
 dec_printloop
-ins_dec_mov             mov     x, decdigits            ' Get digit
-                        add     x, #"0"                 ' Make ASCII
-                        call    #proc_char              ' Print it
+dec_ins_mov             mov     chr_char, dec_digitarray ' Get digit
+                        add     chr_char, #"0"          ' Make ASCII
+                        call    #chr_send               ' Print it
                         
-                        sub     ins_dec_mov, #1         ' Next digit
-                        djnz    numdecdigits, #dec_printloop                        
+                        sub     dec_ins_mov, #1         ' Next digit
+                        djnz    dec_digitcount, #dec_printloop                        
 
                         ' All done
-proc_sgd_ret
-proc_dec_ret            ret
+dec_send_signed_ret
+dec_send_ret            ret
 
 
                         '======================================================================
-                        ' Process a signed decimal number (II=nonzero QQ=01)
+                        ' Send a hexadecimal value
                         '
-                        ' If the value in x is negative, send a '-' and negate the value.
-                        ' Then print the resulting unsigned value.
-
-proc_sgd
-                        call    #separator
-
-                        ' We will print digits from the msb down, but all significant
-                        ' bits are at the lsb of the item. So shift the bits up as necessary.
-                        shl     item, unusedbits
-
-                        ' Check if item is negative, if so print '-' prefix and negate item
-                        
-                        test    item, v_8000_0000h wz   ' Z=1 if positive
-              if_nz     mov     x, #"-"                 ' If negative, print "-"
-              if_nz     call    #proc_char
-              if_nz     neg     item, item              ' Negate item
-
-                        ' Continue as if item is unsigned
-                        jmp     #proc_dec_no_separator
-                        
-
-
-                        '======================================================================
-                        ' Process a hexadecimal number (II=nonzero QQ=10)
+                        ' Iterate the value in hex_value, converting each group of 4 bits into
+                        ' a hexadecimal digit, and print each digit, msd first.
                         '
-                        ' Iterate the value in x, converting each group of 4 bits into a
-                        ' hexadecimal digit, and print each digit, msd first.
-proc_hex
-                        call    #separator
-
-                        ' We will print hex digits from the msb down, but all significant
-                        ' bits are at the lsb of the item. So shift the bits up as necessary.
-                        shl     item, unusedbits
+                        ' Input:
+                        ' hex_value             Value to print (destroyed)
+                        ' hex_numdigits         Number of expected output digits (preserved)         
+                        ' hex_unusedbits        Number of unused bits in value (preserved)         
+                        '
+                        ' Local:
+                        ' hex_count             Remaining number of digits to print
+                        '
+                        ' Calls:
+                        ' chr_send              Print characters        
+                        '
+                        
+hex_send
+                        ' Shift the value to the left to eliminate unused bits
+                        shl     hex_value, hex_unusedbits
 
                         ' Init digit counter
-                        mov     digitcount, digits
+                        mov     hex_count, hex_numdigits
 
-hexdigitloop                        
+hex_loop                        
                         ' Get a hex digit
-                        mov     x, item
-                        shr     x, #28                  ' Reduce to last 4 bits
-                        cmpsub  x, #10 wc               ' C=0 for "0-9", 1 for "A-F"
-              if_nc     add     x, #"0"
-              if_c      add     x, #"A"
+                        mov     chr_char, hex_value
+                        shr     chr_char, #28           ' Reduce to last 4 bits
+                        cmpsub  chr_char, #10 wc        ' C=0 for "0-9", 1 for "A-F"
+              if_nc     add     chr_char, #"0"
+              if_c      add     chr_char, #"A"
 
                         ' Print the digit
-                        call    #proc_char
+                        call    #chr_send
 
                         ' Repeat for all digits
-                        shl     item, #4
-                        djnz    digitcount, #hexdigitloop    
+                        shl     hex_value, #4
+                        djnz    hex_count, #hex_loop    
                          
-proc_hex_ret            ret
+hex_send_ret            ret
 
 
                         '======================================================================
-                        ' Process a binary number (II=nonzero QQ=11)
+                        ' Send a binary value
                         '
-                        ' Iterate the value in x, converting each bit into a binary digit, and
-                        ' print each digit, msd first.
-proc_bin
-                        call    #separator
-
-                        ' We will print binary digits from the msb down, but all significant
-                        ' bits are at the lsb of the item. So shift the bits up as necessary.
-                        shl     item, unusedbits
+                        ' Iterate the value in bin_value, converting each bit into a binary
+                        ' digit, and print each digit, msd first.
+                        '
+                        ' Input:
+                        ' bin_value             Value to print (destroyed)
+                        ' bin_numdigits         Number of expected output digits (preserved)         
+                        ' bin_unusedbits        Number of unused bits in value (preserved)         
+                        '
+                        ' Const:
+                        ' v8000_0000h           Value $8000_0000
+                        '
+                        ' Local:
+                        ' bin_count             Remaining number of digits to print
+                        '
+                        ' Calls:
+                        ' chr_send              Print characters        
+                        
+bin_send
+                        ' Shift the value to the left to eliminate unused bits
+                        shl     bin_value, bin_unusedbits
 
                         ' Init digit counter
-                        mov     digitcount, digits
+                        mov     bin_count, bin_numdigits
 
-bindigitloop                        
+bin_loop                        
                         ' Get a bit
-                        test    item, v_8000_0000h wc   ' C=1 if bit is 1
-              if_nc     mov     x, #"0"
-              if_c      mov     x, #"1"
+                        test    bin_value, v8000_0000h wc ' C=1 if bit is 1
+              if_nc     mov     chr_char, #"0"
+              if_c      mov     chr_char, #"1"
 
                         ' Print the digit
-                        call    #proc_char
+                        call    #chr_send
 
                         ' Repeat for all digits
-                        shl     item, #1
-                        djnz    digitcount, #bindigitloop    
+                        shl     bin_value, #1
+                        djnz    bin_count, #bin_loop    
                          
-proc_bin_ret            ret                                                                                                                        
+bin_send_ret            ret                                                                                                                        
 
 
                         '======================================================================
-                        ' Init numeric item from x and print separator if necessary
-separator
-                        ' Copy value before it's destroyed
-                        mov     item, x
+                        ' Data
 
-                        ' Check if this is the first item being printed
-                        ' If not, print a space
-                        ' The cmpsub instruction resets the flag
-                        cmpsub  firstitem, #1 wz        ' Z=1 if first item
-              if_nz     mov     x, #" "
-              if_nz     call    #proc_char                                        
-
-separator_ret           ret
-
-                                                                        
-' Constants
+' Constants for various purposes
 zero                    long    0
-v_127                   long    127
-v_8000_0000h            long    $8000_0000
 d1                      long    (|< 9)            
-mask_address            long    (|< (1 + sh_AH - sh_A0)) - 1
-mask_count              long    (|< (1 + sh_LH - sh_L0)) - 1
-mask_bittime            long    (|< (1 + sh_TH - sh_T0)) - 1
-mask_pinnum             long    (|< (1 + sh_PH - sh_P0)) - 1
-mask_inmode             long    (|< (1 + sh_IH - sh_I0)) - 1
-mask_outmode            long    (|< (1 + sh_QH - sh_Q0)) - 1
-ins_rdbyte              rdbyte  x, address wz
-ins_rdword              rdword  x, address wz
-ins_rdlong              rdlong  x, address wz
+v127                    long    127
+vFFF0h                  long    $FFF0
+v8000_0000h             long    $8000_0000
+
+' Constants for extracting bit fields from the command
+mask_address            long    (|< (1 + sh_ADDRH    - sh_ADDR0))    - 1
+mask_count              long    (|< (1 + sh_LENH     - sh_LEN0))     - 1
+mask_bittime            long    (|< (1 + sh_BITTIMEH - sh_BITTIME0)) - 1
+mask_pinnum             long    (|< (1 + sh_PINH     - sh_PIN0))     - 1
+mask_inmode             long    (|< (1 + sh_INH      - sh_IN0))      - 1
+mask_outmode            long    (|< (1 + sh_OUTH     - sh_OUT0))     - 1
+
+' Constants coded as instructions
+ins_rdbyte              rdbyte  x, item_address wz
+ins_rdword              rdword  x, item_address wz
+ins_rdlong              rdlong  x, item_address wz
 ins_nop                 nop
-ins_ifjmpend  if_z      jmp     #endcmd
-ins_djnzitemloop        djnz    count, #itemloop
-ins_jmpitemloop         jmp     #itemloop
-ins_call_char           call    #proc_char
-ins_call_filter         call    #proc_filter
-ins_call_dec            call    #proc_dec
-ins_call_sgd            call    #proc_sgd
-ins_call_hex            call    #proc_hex
-ins_call_bin            call    #proc_bin
+ins_ifjmpend  if_z      jmp     #main_endcmd
+ins_djnzitemloop        djnz    item_count, #item_loop_separator
+ins_jmpitemloop         jmp     #item_loop_separator
+ins_call_char           call    #chr_send
+ins_call_filter         call    #chr_filter
+ins_call_dec            call    #dec_send
+ins_call_sgd            call    #dec_send_signed
+ins_call_hex            call    #hex_send
+ins_call_bin            call    #bin_send
 
-' Jump table for input modes ("II" values)
-jmptab_inmode           jmp     #init_char              ' II=%00: char or reset
-                        jmp     #init_byte              ' II=%01: byte
-                        jmp     #init_word              ' II=%10: word
-                        jmp     #init_long              ' II=%11: long
+' Jump table for input mode initializers
+jmptab_inmode           jmp     #init_inmode_spec       ' in_SPEC: Chars, hexdump or reset
+                        jmp     #init_inmode_byte       ' in_BYTE: Byte values
+                        jmp     #init_inmode_word       ' in_WORD: Word values
+                        jmp     #init_inmode_long       ' in_LONG: Long values
 
-' Jump table for output modes (where "II" is zero)
-jmptab_outmode_zero     jmp     #init_char_string       ' QQ=%00: character or string
-                        jmp     #init_char_filter       ' QQ=%01: filtered character or string
-                        jmp     #init_reset             ' QQ=%10: reset pin/baud rate
-                        jmp     #init_res_cts           ' QQ=%11: reset pin/baud rate, w/CTS
+' Jump table for output mode initializers, valid for in_SPEC only
+jmptab_outmode_spec     jmp     #init_spec_string       ' out_CHAR: Send data directly
+                        jmp     #init_spec_filter       ' out_FILT: Send printable chars
+                        jmp     #init_spec_hexdump      ' out_DUMP: Hexdump
+                        jmp     #init_spec_reset        ' out_RSET: Reset tx pin, baud rate
                          
-' Jump table for output modes (where "II" is nonzero)                        
-jmptab_outmode_nonzero  jmp     #init_dec               ' QQ=%00: decimal
-                        jmp     #init_sgd               ' QQ=%01: signed decimal
-                        jmp     #init_hex               ' QQ=%10: hexadecimal
-                        jmp     #init_bin               ' QQ=%11: binary                                 
+' Jump table for output mode initializers, valid for input modes other than in_SPEC                        
+jmptab_outmode_b_w_l    jmp     #init_outmode_dec       ' out_DEC: Decimal
+                        jmp     #init_outmode_sgd       ' out_SGD: Signed decimal
+                        jmp     #init_outmode_hex       ' out_HEX: Hexadecimal
+                        jmp     #init_outmode_bin       ' out_BIN: Binary                                 
 
-' Uninitialized variables
+' Uninitialized data, global
 x                       res     1                       ' Multi-use variable
-item                    res     1                       ' Used for non-character items
-command                 res     1                       ' Current command
-inmode                  res     1                       ' Input mode
-outmode                 res     1                       ' Output mode                                
-address                 res     1                       ' Address from the command
-bytesperitem            res     1                       ' How much to add to source address
-unusedbits              res     1                       ' Number of bits to discard
-digits                  res     1                       ' Number of hex/bin digits to generate
-digitcount              res     1                       ' Digit counter while printing item
-decdigitcount           res     1                       ' Counter for decimal digits
-numdecdigits            res     1                       ' Maximum number of decimal digits
-count                   res     1                       ' Number of items left to process
-firstitem               res     1                       ' Used as flag to print separators
-bitmask                 res     1                       ' Bitmask for output
-bittime                 res     1                       ' Time between bits, in clock cycles
-shiftcount              res     1                       ' Shift counter in bit loop
-time                    res     1                       ' Time keeper in bit loop
-decdigits               res     10                      ' Buffer for decimal digits
+                        
+' Uninitialized data for main loop
+main_starttimestamp     res     1                       ' Value of CNT at start of operation
+main_pbenchmark         res     1                       ' Pointer to benchmark in hub
+main_command            res     1                       ' Current command
+main_inmode             res     1                       ' Input mode from command
+main_outmode            res     1                       ' Output mode from command                                
 
+' Uninitialized data for item loop
+item_count              res     1                       ' Number of remaining items
+item_numbytes           res     1                       ' Number of bytes per items 
+item_unusedbits         res     1                       ' Unused bits near msb of each item
+item_address            res     1                       ' Address of current item
+        
+' Uninitialized data for sending characters                         
+chr_char                res     1                       ' Character to print
+chr_bittime             res     1                       ' Time per serial bit, in clock cycles
+chr_bitmask             res     1                       ' Bitmask for serial output 
+chr_count               res     1                       ' Bit counter
+chr_time                res     1                       ' Time keeper
+
+' Uninitialized data for sending decimal values
+dec_value               res     1                       ' Value to print
+dec_unusedbits          res     1                       ' Unused bits near msb of value        
+dec_numbits             res     1                       ' Number of significant bits in value
+dec_numdigits           res     1                       ' Max number of expected output digits 
+dec_bitcount            res     1                       ' Bit counter
+dec_digitcount          res     1                       ' Output digit counter
+dec_digitarray          res     10                      ' Buffer for BCD digits
+
+' Uninitialized data for sending hexadecimal values
+hex_value               res     1                       ' Value to print 
+hex_unusedbits          res     1                       ' Unused bits near msb of value        
+hex_numdigits           res     1                       ' Number of digits to print 
+hex_count               res     1                       ' Digit counter
+
+' Uninitialized data for sending binary values
+bin_value               res     1                       ' Value to print
+bin_unusedbits          res     1                       ' Unused bits near msb of value        
+bin_numdigits           res     1                       ' Number of digits to print
+bin_count               res     1                       ' Digit counter 
+
+' Uninitialized data for sending hexdumps
+hexdump_lineaddr        res     1                       ' Address at start of line
+hexdump_endaddr         res     1                       ' End address for printing
+hexdump_addr            res     1                       ' Current address        
+hexdump_count           res     1                       ' Remaining bytes to print
+                        
                         fit
+
 
 CON
 ''***************************************************************************
