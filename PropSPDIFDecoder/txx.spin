@@ -10,15 +10,16 @@
 ''* TERMS OF USE: MIT License. See bottom of file.                                                            
 ''***************************************************************************
 ''
-'' This module implements a fast serial transmitter (up to 4 megabits per
-'' second with . It cannot receive, and
-'' it doesn't implement flow control. However, all the formatting routines
-'' (e.g. for printing strings, decimal values, hexadecimal values and binary
-'' values) were written in PASM, so this module makes it easy to generate
-'' formatted output from another PASM cog. Unfortunately this make the module
-'' rather big, however it should be easy to prune away things you don't need,
-'' or extract code fragments that might be useful by themselves in other
-'' projects.  
+'' This module implements a fast serial transmitter (up to 8 megabits per
+'' second when running at 80MHz). It cannot receive, and it doesn't implement
+'' flow control.
+''
+'' All the formatting routines (e.g. for printing strings, decimal values,
+'' hexadecimal values and binary values) were written in PASM, so this module
+'' makes it easy to generate formatted output from another PASM cog.
+'' Unfortunately this make the module rather big; however, if you're short
+'' on space, it should be easy to prune away things you don't need, or
+'' create your own module by extracting the code that you need.
 ''
 '' A cog is dedicated to transmitting data on a single pin, based on commands
 '' that are passed through a single longword. That way, the module can
@@ -238,7 +239,7 @@ PUB Start(par_txpin, par_baudrate)
 '' Starts serial transmitter in a new cog.
 ''
 '' par_txpin      (long): Pin number (0..31)
-'' par_baudrate   (long): Number of bits per second (clkfreq/20 .. clkfreq/$F_FFFF)
+'' par_baudrate   (long): Number of bits per second (clkfreq/10 .. clkfreq/$F_FFFF)
 ''
 '' Returns (ptr to long): Address of command, or 0 on failure                  
 
