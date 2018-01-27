@@ -61,7 +61,7 @@
 '' - Output pin to use for serial data
 ''
 '' Bittime parameter for RSET mode:
-'' - Number of clock cycles per bit, i.e. (clkfreq / baudrate)  
+'' - Number of clock cycles per bit, i.e. (clkfreq / baudrate), min value=10  
 ''
 '' This module only contains the "bare necessities" for Spin functions to use
 '' the PASM code:
@@ -351,36 +351,8 @@ DAT
 '' 3. Then used the command $0000_0001 to print the zero-terminated string at
 ''    location $0001.
 ''
-'' Some indications about performance (these are subject to change!):
-'' - The maximum bitrate (when running the Propeller at 80MHz) is 4 megabits
-''   per second (the bit loop takes at least 20 clock cycles).
-'' - Setup time per command (once the cog receives the command) is about 35
-''   instructions so about 1.75 microseconds at 80MHz (12.5ns * 4 * 35).
-'' - Time from the end of the item loop until the next command has been read
-''   is near zero (2 instructions + 2 hub instructions; <675ns); the item loop
-''   falls through to the command reset and command read instructions. This
-''   time should be irrelevant for most applications. 
-'' - While looping through items, each item takes 1 hub instruction to
-''   retrieve the item, followed by 4 instructions to process the item, so
-''   487.5 ns per item at 80MHz. In addition, there's a processing time for
-''   each item which depends mostly on the output mode and somewhat on the
-''   input mode. Furthermore, it takes time to output each character, which
-''   depends on the configured time per bit.
-''   For example, here is the processing time per item, not including the
-''   actual character time:
-''   - For characters, processing time is 6 instructions (300ns at 80MHz).
-''   - For filtered characters: 9 instructions (450ns) per character.
-''   - For multiple non-character items: 5 instructions (250ns) plus 1
-''     character time to add the separator character
-''   - For hexadecimal items: 5 instructions (250ns) per item for setup,
-''     plus 8 instructions per printed digit.
-''   - For binary items: 5 instructions (250ns) per item for setup, plus
-''     6 instructions per printed digit.
-''   - For decimal items, the time to process an item is difficult to estimate
-''     but in a worst-case situation, it takes about 3865 instructions to
-''     generate the output digits. That's about 193 microseconds at 80MHz.
-'' - The Demo module generates some benchmarks using the built-in benchmarking
-''   facility.
+'' The Demo module generates some benchmarks using the built-in benchmarking
+'' facility.
 
 
 DAT
@@ -726,20 +698,39 @@ init_spec_reset
                         and     x, mask_bittime
                         mov     chr_bittime, x 
 
-                        ' Save the pin number from the command as a bitmask
+                        ' Save the pin number from the command
                         mov     x, main_command
                         shr     x, #sh_PIN0
                         and     x, mask_pinnum
-                        mov     chr_bitmask, #1
-                        shl     chr_bitmask, x
 
-                        ' Set the output and direction registers. Pin 30 should normally have
-                        ' a pull-up resistor (usually on the Prop plug) so by setting the OUTA
-                        ' register before we set DIRA, we prevent glitches that might confuse
-                        ' the receiver on the other end of the cable, and we can start sending
-                        ' data right away.
-                        mov     OUTA, chr_bitmask
-                        mov     DIRA, chr_bitmask
+                        ' At this point, x contains the bit number that we use for TxD output.
+
+                        ' Store the bit number into the lowest bits of CTRA for now.
+                        ' The timer stays off because the CTRMODE fields remains 0.
+                        ' We do this to save a register (this way we can use x to calculate
+                        ' the bitmask).
+                        mov     CTRA, x
+
+                        ' Make sure PHSA never changes by itself.
+                        mov     FRQA, #0
+
+                        ' In NCO mode, PHSA[31] is what controls the output pin, so initialize
+                        ' it to $8000_0000.                        
+                        mov     PHSA, v8000_0000h
+
+                        ' Calculate the bitmask for DIRA in x. 
+                        mov     x, #1
+                        shl     x, CTRA
+
+                        ' Activate the timer before setting DIRA
+                        or      CTRA, ctra_NCO
+
+                        ' Enable the output pin.
+                        ' NOTE: when used with pin 30, a pullup resistor (on the Prop Plug)
+                        ' has been pulling our TxD pin high. By putting the above instructions
+                        ' in this order, the pin is never low until data is generated.
+                        ' NOTE: OUTA is assumed to be 0.                        
+                        mov     DIRA, x
 
                         ' All done here                        
 init_spec_reset_ret     jmp     #main_endcmd
@@ -831,37 +822,49 @@ chr_filter
                         ' This sends the character in chr_char directly to the serial pin.
                         ' Other processing functions also call this to print characters.
                         '
+                        ' The code uses timer A in NCO mode with FRQA set to 0 so the PHSA
+                        ' 
+                        '
                         ' Input:
-                        ' chr_char              Character to print (destroyed)
+                        ' chr_char              Character to print (0..255) (destroyed)
                         ' chr_bittime           Number of clock cycles per bit (preserved)
-                        ' chr_bitmask           Output pin(s) bitmask (preserved)
+                        ' PHSA                  $8000_0000 (destroyed)
                         '
                         ' Const:
+                        ' CTRA                  %00100 << 26 | transmit_pin (preserved)
+                        ' FRQA                  0 (preserved)
+                        ' DIRA                  1 << transmit_pin                                                              
                         '
                         ' Local:
-                        ' chr_count             Number of bits remaining
                         ' chr_time              Keeps track of time
                
 chr_send
-
                         or      chr_char, #$100         ' Add in a stop bit
-                        shl     chr_char, #1            ' Shift to create a start bit
 
-                        mov     chr_count, #10          ' 1 start, 8 data, 1 stop
                         mov     chr_time, CNT           ' Read the current count
-                        add     chr_time, #9            ' Value 9 immediately ends waitcnt
+                        add     chr_time, #9            ' Value 9 ends next waitcnt immediately
 
-                        ' When execution falls into the bit loop below, the first instruction
-                        ' must be a waitcnt. The wait time of 9 cycles in the instruction above
-                        ' accomplishes that the waitcnt immediately exits.
-                                                 
-chr_loop                waitcnt chr_time, chr_bittime   ' Wait until time for this bit
-                        shr     chr_char, #1  wc        ' Shift the bit to transmit into carry
-                        muxc    OUTA, chr_bitmask       ' Set the output
-                        djnz    chr_count, #chr_loop    ' Loop if more bits to transmit
-                        waitcnt chr_time, chr_bittime   ' Make sure stopbit at least 1 bit time                                                             
-
-                        ' At this point, the stop bit is still on the line. That's what we want
+                        waitcnt chr_time, chr_bittime   ' Never waits
+                        mov     PHSA, chr_char          ' Bit 31 is 0: start bit
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 0
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 1
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 2
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 3
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 4
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 5
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 6
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 7
+                        waitcnt chr_time, chr_bittime   ' Wait for next bit
+                        ror     PHSA, #1                ' Output original bit 8: stop bit
+                        waitcnt chr_time, chr_bittime   ' Ensure stop bit at least 1 bit time
 
 chr_send_ret
 chr_filter_ret
@@ -1133,6 +1136,8 @@ d1                      long    (|< 9)
 v126                    long    126
 vFFF0h                  long    $FFF0
 v8000_0000h             long    $8000_0000
+ctra_NCO                long    (%00100 << 26)    
+
 
 ' Constants for extracting bit fields from the command
 mask_address            long    (|< (1 + sh_ADDRH    - sh_ADDR0))    - 1
@@ -1194,8 +1199,6 @@ item_address            res     1                       ' Address of current ite
 ' Uninitialized data for sending characters                         
 chr_char                res     1                       ' Character to print
 chr_bittime             res     1                       ' Time per serial bit, in clock cycles
-chr_bitmask             res     1                       ' Bitmask for serial output 
-chr_count               res     1                       ' Bit counter
 chr_time                res     1                       ' Time keeper
 
 ' Uninitialized data for sending decimal values
