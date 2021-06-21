@@ -2,7 +2,7 @@
 ''* S/PDIF Analyzer for Propeller
 ''* Copyright (C) 2017 Jac Goudsmit
 ''*
-''* TERMS OF USE: MIT License. See bottom of file.                                                            
+''* TERMS OF USE: MIT License. See bottom of file.
 ''***************************************************************************
 ''
 
@@ -16,84 +16,41 @@ OBJ
   hw:           "hardware"
   biphase:      "biphasedec"
   play:         "audioout"
-  statuschan:   "subchannel"
-  userchan:     "subchannel"
-  ser:          "FullDuplexSerial"
+  ser:          "serout"
 
 VAR
   long  subframe
-  byte  statusblock[192/8]
-  byte  userdatablock[384/8]
-  
-PUB main | i, count            
 
-  'cognew(@logicprobe, 0)
-  
+PUB main | i, count
+
+  cognew(@logicprobe, 0)
+
   'play.Start(@subframee)
-  
-  biphase.biphasedec(39, @subframe)                        
 
-  statuschan.Start(@subframe, hw#sf_CHANSTAT, true)
-  userchan.Start(@subframe, hw#sf_USERDATA, false)
-    
-  ser.Start(hw#pin_RX, hw#pin_TX, %0000, 115200)        'requires 1 cog for operation
+  biphase.biphasedec(39, @subframe)
 
-  waitcnt(cnt + (1 * clkfreq))                          'wait 1 second for the serial object to start
-  
-  ser.Str(STRING("Hello, World!"))                      'print a test string
-  ser.Tx($0D)                                           'print a new line
+  ser.Start(hw#pin_TX, @subframe)
 
   repeat
-    ' Dump one line of user data (only half of the data is shown)
-    count := userchan.Get(@userdatablock, count)
-
-    ser.Dec(count)
-    ser.Str(string("U "))
-   
-    repeat i from 0 to constant(192/8 - 1)
-      if (i == constant(192/8))
-        ser.Str(string(13, "> "))
-      ser.Hex(userdatablock[i], 2)
-      ser.Tx(32)
-     
-    ser.Tx($0D)
-   
-    ' Dump onle line of status channel
-    count := statuschan.Get(@statusblock, count)
-
-    ser.Dec(count)
-    ser.Str(string("C "))
-     
-    repeat i from 0 to constant(192/8 - 1)
-     ser.Hex(statusblock[i], 2)
-     ser.Tx(32)
-     
-    ser.Tx($0D)
-
-  ' UNREACHABLE CODE             
-    
-  waitcnt(cnt + (1 * clkfreq))                          'wait 1 second for the serial object to finish printing
-  
-  ser.Stop                                              'Stop the object
 
 DAT
 
                         org 0
 logicprobe
                         mov     dira, outputmask
-loop                        
+loop
                         test    mask_PROBE, ina wc
-                        muxc    outa, mask_LED22
-                        muxnc   outa, mask_LED23
+                        muxc    outa, mask_LED26
+                        muxnc   outa, mask_LED27
                         jmp     #loop
 
-outputmask              long    |< hw#pin_LED22 | |< hw#pin_LED23
-mask_LED22              long    |< hw#pin_LED22
-mask_LED23              long    |< hw#pin_LED23
+outputmask              long    (|< hw#pin_LED26) | (|< hw#pin_LED27)
+mask_LED26              long    |< hw#pin_LED26
+mask_LED27              long    |< hw#pin_LED27
 mask_PROBE              long    |< hw#pin_0
 
-                                              
-CON     
+
+CON
 ''***************************************************************************
 ''* MIT LICENSE
 ''*
@@ -116,4 +73,3 @@ CON
 ''* OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
 ''* THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ''***************************************************************************
-                                                            
